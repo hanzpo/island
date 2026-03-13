@@ -10,10 +10,10 @@ func TestDefault(t *testing.T) {
 		check func(t *testing.T, cfg *Config)
 	}{
 		{
-			name: "default_backend is claude",
+			name: "default_agent is claude",
 			check: func(t *testing.T, cfg *Config) {
-				if cfg.General.DefaultBackend != "claude" {
-					t.Errorf("expected default_backend=claude, got %q", cfg.General.DefaultBackend)
+				if cfg.General.DefaultAgent != "claude" {
+					t.Errorf("expected default_agent=claude, got %q", cfg.General.DefaultAgent)
 				}
 			},
 		},
@@ -74,11 +74,11 @@ func TestDefault(t *testing.T) {
 			},
 		},
 		{
-			name: "backends contain claude codex opencode",
+			name: "agents contain claude codex opencode",
 			check: func(t *testing.T, cfg *Config) {
 				for _, name := range []string{"claude", "codex", "opencode"} {
-					if _, ok := cfg.Backends[name]; !ok {
-						t.Errorf("expected backend %q to exist", name)
+					if _, ok := cfg.Agents[name]; !ok {
+						t.Errorf("expected agent %q to exist", name)
 					}
 				}
 			},
@@ -123,16 +123,16 @@ func TestValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "unknown default backend",
+			name: "unknown default agent",
 			modify: func(cfg *Config) {
-				cfg.General.DefaultBackend = "nonexistent"
+				cfg.General.DefaultAgent = "nonexistent"
 			},
 			wantErr: true,
 		},
 		{
-			name: "empty default backend",
+			name: "empty default agent",
 			modify: func(cfg *Config) {
-				cfg.General.DefaultBackend = ""
+				cfg.General.DefaultAgent = ""
 			},
 			wantErr: true,
 		},

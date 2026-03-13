@@ -2,23 +2,23 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// DashboardKeyMap defines key bindings for the dashboard screen.
-type DashboardKeyMap struct {
-	Up    key.Binding
-	Down  key.Binding
-	Left  key.Binding
-	Right key.Binding
-	Enter key.Binding
-	New   key.Binding
-	Diff  key.Binding
-	Merge key.Binding
-	Discard key.Binding
-	Quit  key.Binding
+// MainKeyMap defines key bindings for the main screen (sidebar + workspace).
+type MainKeyMap struct {
+	Up          key.Binding
+	Down        key.Binding
+	Enter       key.Binding
+	New         key.Binding
+	AddAgent    key.Binding
+	Diff        key.Binding
+	Merge       key.Binding
+	Discard     key.Binding
+	NextSession key.Binding
+	PrevSession key.Binding
+	Quit        key.Binding
 }
 
-// WorkspaceKeyMap defines key bindings for the workspace focus view.
+// WorkspaceKeyMap defines key bindings for the workspace view (right panel).
 type WorkspaceKeyMap struct {
-	Back     key.Binding
 	Cancel   key.Binding
 	Diff     key.Binding
 	PageUp   key.Binding
@@ -27,7 +27,7 @@ type WorkspaceKeyMap struct {
 	Bottom   key.Binding
 }
 
-// DiffKeyMap defines key bindings for the diff review screen.
+// DiffKeyMap defines key bindings for the full-screen diff review.
 type DiffKeyMap struct {
 	Back     key.Binding
 	Merge    key.Binding
@@ -40,63 +40,64 @@ type DiffKeyMap struct {
 
 // DialogKeyMap defines key bindings for the dialog overlay.
 type DialogKeyMap struct {
-	Up     key.Binding
-	Down   key.Binding
+	Next   key.Binding
+	Left   key.Binding
+	Right  key.Binding
 	Select key.Binding
 	Cancel key.Binding
 }
 
-func defaultDashboardKeys() DashboardKeyMap {
-	return DashboardKeyMap{
+func defaultMainKeys() MainKeyMap {
+	return MainKeyMap{
 		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("k/up", "up"),
+			key.WithKeys("up"),
+			key.WithHelp("up", "up"),
 		),
 		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("j/down", "down"),
-		),
-		Left: key.NewBinding(
-			key.WithKeys("left", "h"),
-			key.WithHelp("h/left", "left"),
-		),
-		Right: key.NewBinding(
-			key.WithKeys("right", "l"),
-			key.WithHelp("l/right", "right"),
+			key.WithKeys("down"),
+			key.WithHelp("down", "down"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
-			key.WithHelp("enter", "focus workspace"),
+			key.WithHelp("enter", "send/focus"),
 		),
 		New: key.NewBinding(
-			key.WithKeys("n"),
-			key.WithHelp("n", "new workspace"),
+			key.WithKeys("ctrl+n"),
+			key.WithHelp("ctrl+n", "new workspace"),
+		),
+		AddAgent: key.NewBinding(
+			key.WithKeys("ctrl+a"),
+			key.WithHelp("ctrl+a", "add agent"),
 		),
 		Diff: key.NewBinding(
-			key.WithKeys("d"),
-			key.WithHelp("d", "view diff"),
+			key.WithKeys("ctrl+d"),
+			key.WithHelp("ctrl+d", "view diff"),
 		),
 		Merge: key.NewBinding(
-			key.WithKeys("m"),
-			key.WithHelp("m", "merge"),
+			key.WithKeys("ctrl+m"),
+			key.WithHelp("ctrl+m", "merge"),
 		),
 		Discard: key.NewBinding(
-			key.WithKeys("x"),
-			key.WithHelp("x", "discard"),
+			key.WithKeys("ctrl+x"),
+			key.WithHelp("ctrl+x", "discard"),
+		),
+		NextSession: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "next agent"),
+		),
+		PrevSession: key.NewBinding(
+			key.WithKeys("shift+tab"),
+			key.WithHelp("shift+tab", "prev agent"),
 		),
 		Quit: key.NewBinding(
-			key.WithKeys("q", "ctrl+c"),
-			key.WithHelp("q", "quit"),
+			key.WithKeys("ctrl+c"),
+			key.WithHelp("ctrl+c", "quit"),
 		),
 	}
 }
 
 func defaultWorkspaceKeys() WorkspaceKeyMap {
 	return WorkspaceKeyMap{
-		Back: key.NewBinding(
-			key.WithKeys("esc"),
-			key.WithHelp("esc", "back"),
-		),
 		Cancel: key.NewBinding(
 			key.WithKeys("c"),
 			key.WithHelp("c", "cancel agent"),
@@ -159,17 +160,21 @@ func defaultDiffKeys() DiffKeyMap {
 
 func defaultDialogKeys() DialogKeyMap {
 	return DialogKeyMap{
-		Up: key.NewBinding(
-			key.WithKeys("up", "k"),
-			key.WithHelp("k/up", "up"),
+		Next: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "next field"),
 		),
-		Down: key.NewBinding(
-			key.WithKeys("down", "j"),
-			key.WithHelp("j/down", "down"),
+		Left: key.NewBinding(
+			key.WithKeys("left", "h"),
+			key.WithHelp("left", "prev option"),
+		),
+		Right: key.NewBinding(
+			key.WithKeys("right", "l"),
+			key.WithHelp("right", "next option"),
 		),
 		Select: key.NewBinding(
 			key.WithKeys("enter"),
-			key.WithHelp("enter", "select"),
+			key.WithHelp("enter", "create"),
 		),
 		Cancel: key.NewBinding(
 			key.WithKeys("esc"),

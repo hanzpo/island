@@ -9,13 +9,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// DiffViewModel is the diff review screen with syntax-colored output.
+// DiffViewModel is the full-screen diff review screen with syntax-colored
+// output.
 type DiffViewModel struct {
-	workspaceID string
-	viewport    viewport.Model
-	diff        string
-	keys        DiffKeyMap
-	ready       bool
+	workspaceID   string
+	workspaceName string
+	viewport      viewport.Model
+	diff          string
+	keys          DiffKeyMap
+	ready         bool
 }
 
 func newDiffViewModel() DiffViewModel {
@@ -25,8 +27,9 @@ func newDiffViewModel() DiffViewModel {
 }
 
 // SetDiff populates the diff view with the given diff content.
-func (d *DiffViewModel) SetDiff(workspaceID string, diff string, width, height int) {
+func (d *DiffViewModel) SetDiff(workspaceID, workspaceName, diff string, width, height int) {
 	d.workspaceID = workspaceID
+	d.workspaceName = workspaceName
 	d.diff = diff
 
 	headerHeight := 2 // header + separator
@@ -81,14 +84,16 @@ func (d *DiffViewModel) View(width, height int) string {
 
 	// Header.
 	title := headerStyle.Render("Diff Review")
-	if d.workspaceID != "" {
+	if d.workspaceName != "" {
+		title += footerStyle.Render("  " + d.workspaceName)
+	} else if d.workspaceID != "" {
 		title += footerStyle.Render("  " + d.workspaceID)
 	}
 	b.WriteString(title)
 	b.WriteByte('\n')
 
 	// Separator.
-	sep := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("─", width))
+	sep := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("\u2500", width))
 	b.WriteString(sep)
 	b.WriteByte('\n')
 

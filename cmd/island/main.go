@@ -33,7 +33,7 @@ func newRootCmd() *cobra.Command {
 	var (
 		flagMaxConcurrent int
 		flagBaseBranch    string
-		flagBackend       string
+		flagAgent         string
 		flagConfig        string
 	)
 
@@ -72,8 +72,8 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("base-branch") {
 				cfg.General.BaseBranch = flagBaseBranch
 			}
-			if cmd.Flags().Changed("backend") {
-				cfg.General.DefaultBackend = flagBackend
+			if cmd.Flags().Changed("agent") {
+				cfg.General.DefaultAgent = flagAgent
 			}
 
 			// 3. Validate config.
@@ -86,10 +86,10 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("base branch %q does not exist: %w", cfg.General.BaseBranch, err)
 			}
 
-			// 5. Check backend commands on PATH.
-			for name, backend := range cfg.Backends {
-				if _, err := exec.LookPath(backend.Command); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: backend %q command %q not found on PATH\n", name, backend.Command)
+			// 5. Check agent commands on PATH.
+			for name, agentCfg := range cfg.Agents {
+				if _, err := exec.LookPath(agentCfg.Command); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: agent %q command %q not found on PATH\n", name, agentCfg.Command)
 				}
 			}
 
@@ -126,7 +126,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.Flags().IntVarP(&flagMaxConcurrent, "max-concurrent", "c", 0, "override general.max_concurrent")
 	cmd.Flags().StringVarP(&flagBaseBranch, "base-branch", "b", "", "override general.base_branch")
-	cmd.Flags().StringVar(&flagBackend, "backend", "", "override general.default_backend")
+	cmd.Flags().StringVar(&flagAgent, "agent", "", "override general.default_agent")
 	cmd.Flags().StringVar(&flagConfig, "config", "", "path to a specific config file")
 
 	return cmd
@@ -325,14 +325,14 @@ const starterConfig = `# Island configuration
 # See https://github.com/hanz/island for documentation
 
 # [general]
-# default_backend = "claude"
+# default_agent = "claude"
 # max_concurrent = 5
 # base_branch = "main"
 # worktree_dir = ".island/worktrees"
 # output_buffer_size = 10000
 # auto_cleanup = true
 
-# [backends.claude]
+# [agents.claude]
 # command = "claude"
 # first_run_args = ["-p", "{{prompt}}"]
 # resume_args = ["--continue", "-p", "{{prompt}}"]

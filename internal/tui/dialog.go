@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -13,49 +12,71 @@ import (
 	"github.com/hanz/island/internal/config"
 )
 
-// DialogStep represents which step of the new-workspace dialog is active.
-type DialogStep int
+// DialogField identifies which field has focus in the new-workspace dialog.
+type DialogField int
 
 const (
-	StepSelectBackend DialogStep = iota
-	StepSelectTemplate
-	StepEnterTask
-	StepClosed
+	FieldTask     DialogField = iota // primary: task description
+	FieldAgent                       // agent selection
+	FieldTemplate                    // template selection
 )
 
-// DialogModel is the overlay dialog for creating a new workspace.
+// DialogMode distinguishes between creating a new workspace and adding an
+// agent to an existing workspace.
+type DialogMode int
+
+const (
+	ModeNewWorkspace DialogMode = iota
+	ModeAddAgent                // agent-only picker for existing workspace
+)
+
+// DialogModel is the overlay dialog for creating a new workspace or adding
+// an agent to an existing one.
 type DialogModel struct {
-	step DialogStep
+	open        bool
+	mode        DialogMode
+	activeField DialogField
 
-	// Backend selection
-	backends   []string
-	backendIdx int
-
-	// Template selection
-	templates   []string
-	templateIdx int
-
-	// Task input
+	// Task input (primary field, only used in ModeNewWorkspace).
 	taskInput textinput.Model
 
-	// Result (set when confirmed)
+	// Agent selection.
+	agents       []string // sorted agent names
+	agentIdx     int
+	defaultAgent string // from config
+
+	// Template selection (only used in ModeNewWorkspace).
+	templates   []string // "" + sorted template names
+	templateIdx int
+
+	// Result (set when confirmed).
 	confirmed    bool
-	backendName  string
-	templateName string // "" if no template selected
+	agentName    string
+	templateName string // "" if no template
 	taskText     string
 
 	keys DialogKeyMap
 }
 
 func newDialogModel(cfg *config.Config) DialogModel {
-	// Collect and sort backend names.
-	backends := make([]string, 0, len(cfg.Backends))
-	for name := range cfg.Backends {
-		backends = append(backends, name)
+	// Collect and sort agent names.
+	agents := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		agents = append(agents, name)
 	}
-	sort.Strings(backends)
+	sort.Strings(agents)
 
-	// Collect and sort template names; first entry is "" (no template).
+	// Find default agent index.
+	defaultAgent := cfg.General.DefaultAgent
+	defaultIdx := 0
+	for i, name := range agents {
+		if name == defaultAgent {
+			defaultIdx = i
+			break
+		}
+	}
+
+	// Collect and sort template names; first entry is "" (none).
 	templates := []string{""}
 	tkeys := make([]string, 0, len(cfg.Templates))
 	for name := range cfg.Templates {
@@ -70,52 +91,109 @@ func newDialogModel(cfg *config.Config) DialogModel {
 	ti.Width = 50
 
 	return DialogModel{
-		step:      StepClosed,
-		backends:  backends,
-		templates: templates,
-		taskInput: ti,
-		keys:      defaultDialogKeys(),
+		open:         false,
+		activeField:  FieldTask,
+		taskInput:    ti,
+		agents:       agents,
+		agentIdx:     defaultIdx,
+		defaultAgent: defaultAgent,
+		templates:    templates,
+		templateIdx:  0,
+		keys:         defaultDialogKeys(),
 	}
 }
 
-// Open resets the dialog to the first step.
+// Open resets and shows the dialog in new-workspace mode.
 func (d *DialogModel) Open() {
-	d.step = StepSelectBackend
-	d.backendIdx = 0
-	d.templateIdx = 0
+	d.open = true
+	d.mode = ModeNewWorkspace
+	d.activeField = FieldTask
 	d.confirmed = false
-	d.backendName = ""
+	d.agentName = ""
 	d.templateName = ""
 	d.taskText = ""
 	d.taskInput.SetValue("")
+	d.taskInput.Focus()
+
+	// Reset agent to default.
+	d.agentIdx = 0
+	for i, name := range d.agents {
+		if name == d.defaultAgent {
+			d.agentIdx = i
+			break
+		}
+	}
+
+	// Reset template to "none".
+	d.templateIdx = 0
+}
+
+// OpenAddAgent shows the dialog in add-agent mode (agent picker only).
+func (d *DialogModel) OpenAddAgent() {
+	d.open = true
+	d.mode = ModeAddAgent
+	d.activeField = FieldAgent
+	d.confirmed = false
+	d.agentName = ""
+	d.templateName = ""
+	d.taskText = ""
 	d.taskInput.Blur()
+
+	// Reset agent to default.
+	d.agentIdx = 0
+	for i, name := range d.agents {
+		if name == d.defaultAgent {
+			d.agentIdx = i
+			break
+		}
+	}
 }
 
 // IsOpen returns true if the dialog is visible.
 func (d *DialogModel) IsOpen() bool {
-	return d.step != StepClosed
+	return d.open
 }
 
-// Update handles input for the dialog. Returns a tea.Cmd (for the textinput).
+// Update handles input for the dialog. Returns a tea.Cmd (for textinput blink).
 func (d *DialogModel) Update(msg tea.Msg) tea.Cmd {
-	if !d.IsOpen() {
+	if !d.open {
 		return nil
 	}
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch d.step {
-		case StepSelectBackend:
-			return d.updateBackendStep(msg)
-		case StepSelectTemplate:
-			return d.updateTemplateStep(msg)
-		case StepEnterTask:
-			return d.updateTaskStep(msg)
+		// Esc always cancels.
+		if key.Matches(msg, d.keys.Cancel) {
+			d.open = false
+			d.taskInput.Blur()
+			return nil
+		}
+
+		// Tab cycles fields.
+		if key.Matches(msg, d.keys.Next) {
+			return d.cycleField()
+		}
+
+		// Enter creates workspace (only if task is non-empty).
+		if key.Matches(msg, d.keys.Select) {
+			return d.tryConfirm()
+		}
+
+		// Field-specific handling.
+		switch d.activeField {
+		case FieldTask:
+			var cmd tea.Cmd
+			d.taskInput, cmd = d.taskInput.Update(msg)
+			return cmd
+		case FieldAgent:
+			return d.updateAgentField(msg)
+		case FieldTemplate:
+			return d.updateTemplateField(msg)
 		}
 	}
 
-	// Propagate to textinput if in task step.
-	if d.step == StepEnterTask {
+	// Propagate non-key messages to textinput (for cursor blink).
+	if d.activeField == FieldTask {
 		var cmd tea.Cmd
 		d.taskInput, cmd = d.taskInput.Update(msg)
 		return cmd
@@ -124,121 +202,161 @@ func (d *DialogModel) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-func (d *DialogModel) updateBackendStep(msg tea.KeyMsg) tea.Cmd {
-	switch {
-	case key.Matches(msg, d.keys.Cancel):
-		d.step = StepClosed
-	case key.Matches(msg, d.keys.Up):
-		if d.backendIdx > 0 {
-			d.backendIdx--
+func (d *DialogModel) tryConfirm() tea.Cmd {
+	if d.mode == ModeAddAgent {
+		if len(d.agents) > 0 {
+			d.agentName = d.agents[d.agentIdx]
 		}
-	case key.Matches(msg, d.keys.Down):
-		if d.backendIdx < len(d.backends)-1 {
-			d.backendIdx++
+		d.confirmed = true
+		d.open = false
+		return nil
+	}
+
+	value := strings.TrimSpace(d.taskInput.Value())
+	if value != "" {
+		d.taskText = value
+		if len(d.agents) > 0 {
+			d.agentName = d.agents[d.agentIdx]
 		}
-	case key.Matches(msg, d.keys.Select):
-		if len(d.backends) > 0 {
-			d.backendName = d.backends[d.backendIdx]
-			d.step = StepSelectTemplate
-			d.templateIdx = 0
-		}
+		d.templateName = d.templates[d.templateIdx]
+		d.confirmed = true
+		d.open = false
+		d.taskInput.Blur()
 	}
 	return nil
 }
 
-func (d *DialogModel) updateTemplateStep(msg tea.KeyMsg) tea.Cmd {
-	switch {
-	case key.Matches(msg, d.keys.Cancel):
-		d.step = StepClosed
-	case key.Matches(msg, d.keys.Up):
-		if d.templateIdx > 0 {
-			d.templateIdx--
-		}
-	case key.Matches(msg, d.keys.Down):
-		if d.templateIdx < len(d.templates)-1 {
-			d.templateIdx++
-		}
-	case key.Matches(msg, d.keys.Select):
-		d.templateName = d.templates[d.templateIdx]
-		d.step = StepEnterTask
+func (d *DialogModel) cycleField() tea.Cmd {
+	if d.mode == ModeAddAgent {
+		// Only the agent field is available.
+		return nil
+	}
+	switch d.activeField {
+	case FieldTask:
+		d.activeField = FieldAgent
+		d.taskInput.Blur()
+	case FieldAgent:
+		d.activeField = FieldTemplate
+	case FieldTemplate:
+		d.activeField = FieldTask
 		d.taskInput.Focus()
 		return textinput.Blink
 	}
 	return nil
 }
 
-func (d *DialogModel) updateTaskStep(msg tea.KeyMsg) tea.Cmd {
+func (d *DialogModel) updateAgentField(msg tea.KeyMsg) tea.Cmd {
 	switch {
-	case key.Matches(msg, d.keys.Cancel):
-		d.step = StepClosed
-		d.taskInput.Blur()
-		return nil
-	case key.Matches(msg, d.keys.Select):
-		value := strings.TrimSpace(d.taskInput.Value())
-		if value != "" {
-			d.taskText = value
-			d.confirmed = true
-			d.step = StepClosed
-			d.taskInput.Blur()
+	case key.Matches(msg, d.keys.Left):
+		if d.agentIdx > 0 {
+			d.agentIdx--
 		}
-		return nil
-	default:
-		var cmd tea.Cmd
-		d.taskInput, cmd = d.taskInput.Update(msg)
-		return cmd
+	case key.Matches(msg, d.keys.Right):
+		if d.agentIdx < len(d.agents)-1 {
+			d.agentIdx++
+		}
 	}
+	return nil
+}
+
+func (d *DialogModel) updateTemplateField(msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case key.Matches(msg, d.keys.Left):
+		if d.templateIdx > 0 {
+			d.templateIdx--
+		}
+	case key.Matches(msg, d.keys.Right):
+		if d.templateIdx < len(d.templates)-1 {
+			d.templateIdx++
+		}
+	}
+	return nil
 }
 
 // View renders the dialog overlay centered in the given dimensions.
 func (d *DialogModel) View(width, height int) string {
-	if !d.IsOpen() {
+	if !d.open {
 		return ""
 	}
 
-	const dialogWidth = 60
+	const dialogWidth = 56
 	var b strings.Builder
 
-	switch d.step {
-	case StepSelectBackend:
-		b.WriteString(dialogTitleStyle.Render("Select Backend"))
-		b.WriteByte('\n')
-		for i, name := range d.backends {
-			cursor := "  "
-			style := normalItemStyle
-			if i == d.backendIdx {
-				cursor = "> "
-				style = selectedItemStyle
-			}
-			b.WriteString(style.Render(cursor + name))
-			if i < len(d.backends)-1 {
-				b.WriteByte('\n')
-			}
-		}
+	if d.mode == ModeAddAgent {
+		b.WriteString(dialogTitleStyle.Render("Add Agent to Workspace"))
+	} else {
+		b.WriteString(dialogTitleStyle.Render("New Workspace"))
+	}
+	b.WriteByte('\n')
 
-	case StepSelectTemplate:
-		b.WriteString(dialogTitleStyle.Render("Select Template (optional)"))
-		b.WriteByte('\n')
-		for i, name := range d.templates {
-			cursor := "  "
-			style := normalItemStyle
-			if i == d.templateIdx {
-				cursor = "> "
-				style = selectedItemStyle
-			}
-			label := name
-			if label == "" {
-				label = "None (raw prompt)"
-			}
-			b.WriteString(style.Render(cursor + label))
-			if i < len(d.templates)-1 {
-				b.WriteByte('\n')
-			}
+	// Task field (only in new-workspace mode).
+	if d.mode == ModeNewWorkspace {
+		taskLabel := "Task:"
+		if d.activeField == FieldTask {
+			taskLabel = selectedItemStyle.Render("Task:")
+		} else {
+			taskLabel = normalItemStyle.Render("Task:")
 		}
-
-	case StepEnterTask:
-		b.WriteString(dialogTitleStyle.Render("Task Description"))
-		b.WriteByte('\n')
+		b.WriteString(taskLabel + " ")
 		b.WriteString(d.taskInput.View())
+		b.WriteString("\n\n")
+	}
+
+	// Agent field.
+	agentLabel := "Agent:"
+	if d.activeField == FieldAgent {
+		agentLabel = selectedItemStyle.Render("Agent:")
+	} else {
+		agentLabel = normalItemStyle.Render("Agent:")
+	}
+
+	agentName := ""
+	if len(d.agents) > 0 {
+		agentName = d.agents[d.agentIdx]
+	}
+	agentDisplay := agentName
+	if agentName == d.defaultAgent {
+		agentDisplay += " (default)"
+	}
+	if d.activeField == FieldAgent {
+		agentDisplay = selectedItemStyle.Render(agentDisplay)
+	}
+	tabHint := footerStyle.Render("  [\u2190/\u2192: change]")
+	b.WriteString(agentLabel + "    " + agentDisplay + tabHint)
+	b.WriteByte('\n')
+
+	// Template field (only in new-workspace mode).
+	if d.mode == ModeNewWorkspace {
+		templateLabel := "Template:"
+		if d.activeField == FieldTemplate {
+			templateLabel = selectedItemStyle.Render("Template:")
+		} else {
+			templateLabel = normalItemStyle.Render("Template:")
+		}
+
+		templateName := d.templates[d.templateIdx]
+		templateDisplay := templateName
+		if templateDisplay == "" {
+			templateDisplay = "none"
+		}
+		if d.activeField == FieldTemplate {
+			templateDisplay = selectedItemStyle.Render(templateDisplay)
+		}
+		tTabHint := ""
+		if d.activeField != FieldTemplate {
+			tTabHint = footerStyle.Render("  [Tab: change]")
+		} else {
+			tTabHint = footerStyle.Render("  [\u2190/\u2192: change]")
+		}
+		b.WriteString(templateLabel + " " + templateDisplay + tTabHint)
+	}
+	b.WriteString("\n\n")
+
+	// Footer hints.
+	if d.mode == ModeAddAgent {
+		b.WriteString(footerStyle.Render("Enter: add \u2022 Esc: cancel"))
+	} else {
+		b.WriteString(footerStyle.Render("Enter: create \u2022 Esc: cancel"))
 	}
 
 	content := b.String()
@@ -247,40 +365,9 @@ func (d *DialogModel) View(width, height int) string {
 		Width(dialogWidth).
 		Render(content)
 
-	// Center the dialog in the terminal.
 	return lipgloss.Place(
 		width, height,
 		lipgloss.Center, lipgloss.Center,
 		styledDialog,
 	)
-}
-
-// stepIndicator returns a human-readable indicator of dialog progress.
-func (d *DialogModel) stepIndicator() string {
-	switch d.step {
-	case StepSelectBackend:
-		return "Step 1/3"
-	case StepSelectTemplate:
-		return "Step 2/3"
-	case StepEnterTask:
-		return "Step 3/3"
-	default:
-		return ""
-	}
-}
-
-// String implements fmt.Stringer for DialogStep (used in debugging).
-func (s DialogStep) String() string {
-	switch s {
-	case StepSelectBackend:
-		return "SelectBackend"
-	case StepSelectTemplate:
-		return "SelectTemplate"
-	case StepEnterTask:
-		return "EnterTask"
-	case StepClosed:
-		return "Closed"
-	default:
-		return fmt.Sprintf("DialogStep(%d)", int(s))
-	}
 }

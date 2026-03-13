@@ -10,8 +10,8 @@ import (
 	"github.com/hanz/island/internal/config"
 )
 
-// Backend represents an AI coding agent backend (e.g., claude, codex).
-type Backend struct {
+// AgentDef defines how to invoke an AI coding agent.
+type AgentDef struct {
 	Name         string
 	Command      string
 	FirstRunArgs []string
@@ -22,9 +22,9 @@ type Backend struct {
 	Permissions  string
 }
 
-// BackendFromConfig creates a Backend from a config.BackendConfig.
-func BackendFromConfig(name string, cfg config.BackendConfig) *Backend {
-	return &Backend{
+// AgentDefFromConfig creates an AgentDef from a config.AgentConfig.
+func AgentDefFromConfig(name string, cfg config.AgentConfig) *AgentDef {
+	return &AgentDef{
 		Name:         name,
 		Command:      cfg.Command,
 		FirstRunArgs: cfg.FirstRunArgs,
@@ -41,21 +41,21 @@ func BackendFromConfig(name string, cfg config.BackendConfig) *Backend {
 // If isResume, uses ResumeArgs; otherwise FirstRunArgs.
 // Appends ExtraArgs. If Model is set, appends --model <model>.
 // If Permissions is set, splits by spaces and prepends.
-func (b *Backend) BuildArgs(prompt string, isResume bool) []string {
+func (a *AgentDef) BuildArgs(prompt string, isResume bool) []string {
 	var args []string
 
 	// Prepend permissions flags if set.
-	if b.Permissions != "" {
-		parts := strings.Fields(b.Permissions)
+	if a.Permissions != "" {
+		parts := strings.Fields(a.Permissions)
 		args = append(args, parts...)
 	}
 
 	// Choose the base args template.
 	var baseArgs []string
 	if isResume {
-		baseArgs = b.ResumeArgs
+		baseArgs = a.ResumeArgs
 	} else {
-		baseArgs = b.FirstRunArgs
+		baseArgs = a.FirstRunArgs
 	}
 
 	// Replace {{prompt}} placeholder in each arg.
@@ -64,21 +64,21 @@ func (b *Backend) BuildArgs(prompt string, isResume bool) []string {
 	}
 
 	// Append extra args.
-	args = append(args, b.ExtraArgs...)
+	args = append(args, a.ExtraArgs...)
 
 	// Append model flag if set.
-	if b.Model != "" {
-		args = append(args, "--model", b.Model)
+	if a.Model != "" {
+		args = append(args, "--model", a.Model)
 	}
 
 	return args
 }
 
-// BuildEnv returns os.Environ() merged with the backend's extra env vars.
-// Backend env vars override existing environment variables.
-func (b *Backend) BuildEnv() []string {
+// BuildEnv returns os.Environ() merged with the agent's extra env vars.
+// Agent env vars override existing environment variables.
+func (a *AgentDef) BuildEnv() []string {
 	env := os.Environ()
-	for k, v := range b.Env {
+	for k, v := range a.Env {
 		env = append(env, k+"="+v)
 	}
 	return env
@@ -93,10 +93,10 @@ type mcpServerJSON struct {
 	Env     map[string]string `json:"env,omitempty"`
 }
 
-// SetupMCPConfig writes MCP server config into the worktree for this backend.
-// Supported backends: "claude" (.mcp.json), "codex" (.codex/config.json),
-// "opencode" (opencode.json). Unknown backends are silently skipped.
-func (b *Backend) SetupMCPConfig(worktreePath string, servers map[string]config.MCPServer) error {
+// SetupMCPConfig writes MCP server config into the worktree for this agent.
+// Supported agents: "claude" (.mcp.json), "codex" (.codex/config.json),
+// "opencode" (opencode.json). Unknown agents are silently skipped.
+func (a *AgentDef) SetupMCPConfig(worktreePath string, servers map[string]config.MCPServer) error {
 	if len(servers) == 0 {
 		return nil
 	}
@@ -118,7 +118,7 @@ func (b *Backend) SetupMCPConfig(worktreePath string, servers map[string]config.
 		configData interface{}
 	)
 
-	switch b.Name {
+	switch a.Name {
 	case "claude":
 		configPath = filepath.Join(worktreePath, ".mcp.json")
 		configData = map[string]interface{}{
@@ -135,7 +135,7 @@ func (b *Backend) SetupMCPConfig(worktreePath string, servers map[string]config.
 			"mcpServers": serversJSON,
 		}
 	default:
-		// Unknown backend; skip silently.
+		// Unknown agent; skip silently.
 		return nil
 	}
 

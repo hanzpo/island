@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// WorkspaceStatus represents the current state of a workspace.
+// WorkspaceStatus represents the current state of a workspace or session.
 type WorkspaceStatus int
 
 const (
@@ -44,27 +44,104 @@ func (s WorkspaceStatus) String() string {
 	}
 }
 
-// Workspace represents a single agent workspace with its state and output buffers.
+// Session represents one agent running in a workspace.
+type Session struct {
+	ID        string
+	Agent     *AgentDef
+	Task      string
+	Status    WorkspaceStatus
+	Output    *RingBuffer
+	Stderr    *RingBuffer
+	TurnCount int
+	ExitCode  int
+	Error     error
+	Cancel    context.CancelFunc
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// Workspace represents an isolated workspace with one branch/worktree
+// and potentially multiple agent sessions.
 type Workspace struct {
 	ID           string
-	Task         string
-	Backend      *Backend
-	Status       WorkspaceStatus
+	Name         string // display name derived from task
 	Branch       string
 	WorktreePath string
-	Output       *RingBuffer
-	Stderr       *RingBuffer
-	TurnCount    int
-	ExitCode     int
-	Error        error
+	Sessions     []*Session
+	ActiveIdx    int // index of focused session in TUI
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
-	Cancel       context.CancelFunc
+}
+
+// ActiveSession returns the currently focused session, or nil.
+func (w *Workspace) ActiveSession() *Session {
+	if w.ActiveIdx < 0 || w.ActiveIdx >= len(w.Sessions) {
+		return nil
+	}
+	return w.Sessions[w.ActiveIdx]
+}
+
+// Status returns the "most active" status across all sessions.
+// Priority: Running > Initializing > Waiting > Completed > Errored > Cancelled
+func (w *Workspace) Status() WorkspaceStatus {
+	if len(w.Sessions) == 0 {
+		return StatusInitializing
+	}
+
+	hasInitializing := false
+	hasWaiting := false
+	hasCompleted := false
+	hasErrored := false
+	allCancelled := true
+
+	for _, s := range w.Sessions {
+		switch s.Status {
+		case StatusRunning:
+			return StatusRunning
+		case StatusMerging:
+			return StatusMerging
+		case StatusInitializing:
+			hasInitializing = true
+			allCancelled = false
+		case StatusWaiting:
+			hasWaiting = true
+			allCancelled = false
+		case StatusCompleted:
+			hasCompleted = true
+			allCancelled = false
+		case StatusErrored:
+			hasErrored = true
+			allCancelled = false
+		case StatusCancelled:
+			// stays true
+		default:
+			allCancelled = false
+		}
+	}
+
+	if hasInitializing {
+		return StatusInitializing
+	}
+	if hasWaiting {
+		return StatusWaiting
+	}
+	if hasCompleted {
+		return StatusCompleted
+	}
+	if hasErrored {
+		return StatusErrored
+	}
+	if allCancelled {
+		return StatusCancelled
+	}
+
+	return StatusCompleted
 }
 
 // OutputMsg is sent when an agent produces output.
 type OutputMsg struct {
 	WorkspaceID string
+	SessionID   string
 	Chunk       string
 	IsStderr    bool
 }
@@ -72,36 +149,45 @@ type OutputMsg struct {
 // DoneMsg is sent when an agent process exits.
 type DoneMsg struct {
 	WorkspaceID string
+	SessionID   string
 	ExitCode    int
 	Err         error
 }
 
-// Runner manages the lifecycle of an agent process.
+// Runner manages the lifecycle of a single agent session's process.
 type Runner struct {
-	workspace *Workspace
-	backend   *Backend
-	send      func(interface{})
-	cmd       *exec.Cmd
+	workspaceID string
+	session     *Session
+	agent       *AgentDef
+	workDir     string // worktree path
+	send        func(interface{})
+	cmd         *exec.Cmd
 }
 
-// NewRunner creates a new Runner for the given workspace and backend.
-func NewRunner(ws *Workspace, backend *Backend, send func(interface{})) *Runner {
+// NewRunner creates a new Runner for the given session and agent.
+func NewRunner(workspaceID string, session *Session, agent *AgentDef, workDir string, send func(interface{})) *Runner {
 	return &Runner{
-		workspace: ws,
-		backend:   backend,
-		send:      send,
+		workspaceID: workspaceID,
+		session:     session,
+		agent:       agent,
+		workDir:     workDir,
+		send:        send,
 	}
 }
 
 // Start spawns the agent process and begins streaming output. It uses
 // os/exec.CommandContext for cancellation support. Output is read using raw
 // Read() calls for smooth streaming.
+//
+// The runner writes ONLY to the session's ring buffers. It sends OutputMsg
+// to the TUI for notification only (the TUI should NOT also write to the
+// ring buffer — it should just refresh the viewport from the ring buffer).
 func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error {
-	args := r.backend.BuildArgs(prompt, isResume)
+	args := r.agent.BuildArgs(prompt, isResume)
 
-	r.cmd = exec.CommandContext(ctx, r.backend.Command, args...)
-	r.cmd.Dir = r.workspace.WorktreePath
-	r.cmd.Env = r.backend.BuildEnv()
+	r.cmd = exec.CommandContext(ctx, r.agent.Command, args...)
+	r.cmd.Dir = r.workDir
+	r.cmd.Env = r.agent.BuildEnv()
 
 	stdout, err := r.cmd.StdoutPipe()
 	if err != nil {
@@ -135,7 +221,8 @@ func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error 
 			}
 		}
 		r.send(DoneMsg{
-			WorkspaceID: r.workspace.ID,
+			WorkspaceID: r.workspaceID,
+			SessionID:   r.session.ID,
 			ExitCode:    exitCode,
 			Err:         waitErr,
 		})
@@ -145,14 +232,16 @@ func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error 
 }
 
 // streamOutput reads from the given reader using raw Read() calls and sends
-// OutputMsg chunks. It also writes complete lines to the appropriate ring buffer.
+// OutputMsg chunks to the TUI for notification. It writes complete lines to
+// the session's ring buffer. The TUI should NOT also write to the ring buffer;
+// it should refresh its viewport from the ring buffer contents.
 func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 	buf := make([]byte, 4096)
 	var partial string
 
-	ringBuffer := r.workspace.Output
+	ringBuffer := r.session.Output
 	if isStderr {
-		ringBuffer = r.workspace.Stderr
+		ringBuffer = r.session.Stderr
 	}
 
 	for {
@@ -160,9 +249,10 @@ func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 		if n > 0 {
 			chunk := string(buf[:n])
 
-			// Send raw chunk to TUI for immediate display.
+			// Send raw chunk to TUI for notification that new output arrived.
 			r.send(OutputMsg{
-				WorkspaceID: r.workspace.ID,
+				WorkspaceID: r.workspaceID,
+				SessionID:   r.session.ID,
 				Chunk:       chunk,
 				IsStderr:    isStderr,
 			})

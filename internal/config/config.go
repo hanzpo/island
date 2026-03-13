@@ -11,18 +11,18 @@ import (
 
 // Config is the top-level configuration structure for island.
 type Config struct {
-	General   GeneralConfig              `toml:"general"`
-	Backends  map[string]BackendConfig   `toml:"backends"`
-	MCP       map[string]MCPServer       `toml:"mcp"`
-	Hooks     HooksConfig                `toml:"hooks"`
-	Init      InitConfig                 `toml:"init"`
-	Templates map[string]TemplateConfig  `toml:"templates"`
-	UI        UIConfig                   `toml:"ui"`
+	General   GeneralConfig             `toml:"general"`
+	Agents    map[string]AgentConfig    `toml:"agents"`
+	MCP       map[string]MCPServer      `toml:"mcp"`
+	Hooks     HooksConfig               `toml:"hooks"`
+	Init      InitConfig                `toml:"init"`
+	Templates map[string]TemplateConfig `toml:"templates"`
+	UI        UIConfig                  `toml:"ui"`
 }
 
 // GeneralConfig holds general island settings.
 type GeneralConfig struct {
-	DefaultBackend   string `toml:"default_backend"`
+	DefaultAgent     string `toml:"default_agent"`
 	MaxConcurrent    int    `toml:"max_concurrent"`
 	BaseBranch       string `toml:"base_branch"`
 	WorktreeDir      string `toml:"worktree_dir"`
@@ -30,8 +30,8 @@ type GeneralConfig struct {
 	AutoCleanup      bool   `toml:"auto_cleanup"`
 }
 
-// BackendConfig defines how to invoke an AI coding agent backend.
-type BackendConfig struct {
+// AgentConfig defines how to invoke an AI coding agent.
+type AgentConfig struct {
 	Command      string            `toml:"command"`
 	FirstRunArgs []string          `toml:"first_run_args"`
 	ResumeArgs   []string          `toml:"resume_args"`
@@ -79,24 +79,24 @@ type UIConfig struct {
 	MinPanelWidth   int    `toml:"min_panel_width"`
 }
 
-// Default returns a Config with sane defaults, including pre-configured backends
+// Default returns a Config with sane defaults, including pre-configured agents
 // and prompt templates.
 func Default() *Config {
 	return &Config{
 		General: GeneralConfig{
-			DefaultBackend:   "claude",
+			DefaultAgent:     "claude",
 			MaxConcurrent:    5,
 			BaseBranch:       "main",
 			WorktreeDir:      ".island/worktrees",
 			OutputBufferSize: 10000,
 			AutoCleanup:      true,
 		},
-		Backends: map[string]BackendConfig{
+		Agents: map[string]AgentConfig{
 			"claude": {
 				Command:      "claude",
 				FirstRunArgs: []string{"-p", "{{prompt}}"},
 				ResumeArgs:   []string{"--continue", "-p", "{{prompt}}"},
-				ExtraArgs:    nil,
+				ExtraArgs:    []string{"--verbose"},
 				Env:          map[string]string{},
 			},
 			"codex": {
@@ -190,11 +190,11 @@ func decodeFileInto(path string, v interface{}) error {
 
 // Validate checks the config for logical errors.
 func Validate(cfg *Config) error {
-	if cfg.General.DefaultBackend == "" {
-		return fmt.Errorf("general.default_backend must be set")
+	if cfg.General.DefaultAgent == "" {
+		return fmt.Errorf("general.default_agent must be set")
 	}
-	if _, ok := cfg.Backends[cfg.General.DefaultBackend]; !ok {
-		return fmt.Errorf("general.default_backend %q not found in backends", cfg.General.DefaultBackend)
+	if _, ok := cfg.Agents[cfg.General.DefaultAgent]; !ok {
+		return fmt.Errorf("general.default_agent %q not found in agents", cfg.General.DefaultAgent)
 	}
 	if cfg.General.MaxConcurrent <= 0 {
 		return fmt.Errorf("general.max_concurrent must be > 0, got %d", cfg.General.MaxConcurrent)

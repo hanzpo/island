@@ -17,7 +17,7 @@ type Runner struct {
 type Env struct {
 	WorkspaceID  string
 	Branch       string
-	Backend      string
+	Agent        string
 	WorktreePath string
 	Task         string
 	RepoRoot     string
@@ -62,8 +62,8 @@ func (e Env) envVars() []string {
 	if e.Branch != "" {
 		vars = append(vars, "ISLAND_BRANCH="+e.Branch)
 	}
-	if e.Backend != "" {
-		vars = append(vars, "ISLAND_BACKEND="+e.Backend)
+	if e.Agent != "" {
+		vars = append(vars, "ISLAND_AGENT="+e.Agent)
 	}
 	if e.WorktreePath != "" {
 		vars = append(vars, "ISLAND_WORKTREE_PATH="+e.WorktreePath)

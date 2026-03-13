@@ -90,4 +90,55 @@ var (
 			Border(lipgloss.NormalBorder(), true, false, false, false).
 			BorderForeground(secondaryColor).
 			Padding(0, 1)
+
+	// Sidebar styles
+	sidebarStyle = lipgloss.NewStyle().
+			Border(lipgloss.Border{
+			Top:         "",
+			Bottom:      "",
+			Left:        "",
+			Right:       "│",
+			TopLeft:     "",
+			TopRight:    "",
+			BottomLeft:  "",
+			BottomRight: "",
+		}, false, true, false, false).
+		BorderForeground(secondaryColor).
+		Padding(0, 1, 0, 0)
+
+	sidebarHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(primaryColor).
+				Padding(0, 0, 1, 0)
+
+	sidebarItemStyle = lipgloss.NewStyle().
+				Foreground(secondaryColor)
+
+	sidebarActiveStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(primaryColor)
+
+	// Session tab styles
+	sessionTabStyle = lipgloss.NewStyle().
+			Foreground(secondaryColor).
+			Padding(0, 1)
+
+	sessionActiveTabStyle = lipgloss.NewStyle().
+				Bold(true).
+				Underline(true).
+				Foreground(primaryColor).
+				Padding(0, 1)
+
+	// Thinking / chain-of-thought
+	thinkingStyle = lipgloss.NewStyle().
+			Faint(true).
+			Italic(true)
+
+	// Spinner animation frames for active indicators
+	spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+	// User message prefix styling
+	userMsgStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39")).
+			Bold(true)
 )
