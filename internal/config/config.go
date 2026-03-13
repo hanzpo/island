@@ -39,6 +39,7 @@ type AgentConfig struct {
 	Env          map[string]string `toml:"env"`
 	Model        string            `toml:"model"`
 	Permissions  string            `toml:"permissions"`
+	OutputFormat string            `toml:"output_format"`
 }
 
 // MCPServer defines an MCP server configuration.
@@ -98,6 +99,8 @@ func Default() *Config {
 				ResumeArgs:   []string{"--continue", "-p", "{{prompt}}"},
 				ExtraArgs:    []string{"--verbose"},
 				Env:          map[string]string{},
+				Permissions:  "--dangerously-skip-permissions",
+				OutputFormat: "stream-json",
 			},
 			"codex": {
 				Command:      "codex",

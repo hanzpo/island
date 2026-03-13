@@ -20,6 +20,7 @@ type AgentDef struct {
 	Env          map[string]string
 	Model        string
 	Permissions  string
+	OutputFormat string
 }
 
 // AgentDefFromConfig creates an AgentDef from a config.AgentConfig.
@@ -33,6 +34,7 @@ func AgentDefFromConfig(name string, cfg config.AgentConfig) *AgentDef {
 		Env:          cfg.Env,
 		Model:        cfg.Model,
 		Permissions:  cfg.Permissions,
+		OutputFormat: cfg.OutputFormat,
 	}
 }
 
@@ -65,6 +67,11 @@ func (a *AgentDef) BuildArgs(prompt string, isResume bool) []string {
 
 	// Append extra args.
 	args = append(args, a.ExtraArgs...)
+
+	// Append output format flag if set.
+	if a.OutputFormat != "" {
+		args = append(args, "--output-format", a.OutputFormat)
+	}
 
 	// Append model flag if set.
 	if a.Model != "" {

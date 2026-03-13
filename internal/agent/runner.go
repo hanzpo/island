@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -203,10 +204,14 @@ func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error 
 		return fmt.Errorf("starting agent process: %w", err)
 	}
 
-	// Stream stdout.
-	go r.streamOutput(stdout, false)
+	// Stream stdout — use JSON parser for stream-json agents.
+	if r.agent.OutputFormat == "stream-json" {
+		go r.streamOutputJSON(stdout)
+	} else {
+		go r.streamOutput(stdout, false)
+	}
 
-	// Stream stderr.
+	// Stderr is always raw text.
 	go r.streamOutput(stderr, true)
 
 	// Wait for process exit.
@@ -281,5 +286,36 @@ func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 	// Flush any remaining partial line.
 	if partial != "" {
 		ringBuffer.Write(partial)
+	}
+}
+
+// streamOutputJSON reads newline-delimited JSON from stdout (stream-json format),
+// parses each event, and writes formatted display lines to the ring buffer.
+// This gives users visibility into tool calls, text output, and results — similar
+// to the interactive Claude Code CLI experience.
+func (r *Runner) streamOutputJSON(reader io.Reader) {
+	scanner := bufio.NewScanner(reader)
+	// Large buffer for JSON lines that may contain file contents in tool results.
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	parser := NewStreamParser()
+	ringBuffer := r.session.Output
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		displayLines := parser.ParseLine(line)
+
+		if len(displayLines) > 0 {
+			for _, dl := range displayLines {
+				ringBuffer.Write(dl)
+			}
+
+			r.send(OutputMsg{
+				WorkspaceID: r.workspaceID,
+				SessionID:   r.session.ID,
+				Chunk:       strings.Join(displayLines, "\n"),
+				IsStderr:    false,
+			})
+		}
 	}
 }
