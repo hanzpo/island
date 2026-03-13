@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/hanz/island/internal/config"
@@ -81,29 +82,42 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("invalid configuration: %w", err)
 			}
 
-			// 4. Check base branch exists.
-			if err := checkBranchExists(repoRoot, cfg.General.BaseBranch); err != nil {
-				return fmt.Errorf("base branch %q does not exist: %w", cfg.General.BaseBranch, err)
-			}
+			// 4-7. Run independent startup checks in parallel.
+			var branchErr error
+			var wg sync.WaitGroup
 
-			// 5. Check agent commands on PATH.
-			for name, agentCfg := range cfg.Agents {
-				if _, err := exec.LookPath(agentCfg.Command); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: agent %q command %q not found on PATH\n", name, agentCfg.Command)
+			wg.Add(4)
+			go func() {
+				defer wg.Done()
+				branchErr = checkBranchExists(repoRoot, cfg.General.BaseBranch)
+			}()
+			go func() {
+				defer wg.Done()
+				for name, agentCfg := range cfg.Agents {
+					if _, err := exec.LookPath(agentCfg.Command); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: agent %q command %q not found on PATH\n", name, agentCfg.Command)
+					}
 				}
-			}
-
-			// 6. Auto-cleanup if configured.
-			if cfg.General.AutoCleanup {
-				mgr := git.NewManager(repoRoot, cfg.General.WorktreeDir)
-				if err := mgr.Prune(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: auto-cleanup prune failed: %v\n", err)
+			}()
+			go func() {
+				defer wg.Done()
+				if cfg.General.AutoCleanup {
+					mgr := git.NewManager(repoRoot, cfg.General.WorktreeDir)
+					if err := mgr.Prune(ctx); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: auto-cleanup prune failed: %v\n", err)
+					}
 				}
-			}
+			}()
+			go func() {
+				defer wg.Done()
+				if err := git.EnsureGitignore(repoRoot); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
+				}
+			}()
+			wg.Wait()
 
-			// 7. Ensure .gitignore.
-			if err := git.EnsureGitignore(repoRoot); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
+			if branchErr != nil {
+				return fmt.Errorf("base branch %q does not exist: %w", cfg.General.BaseBranch, branchErr)
 			}
 
 			// 8. Create App.
@@ -338,7 +352,8 @@ const starterConfig = `# Island configuration
 # resume_args = ["--continue", "-p", "{{prompt}}"]
 # extra_args = []
 # model = ""
-# permissions = ""
+# permissions = "--dangerously-skip-permissions"
+# output_format = "stream-json"
 
 # [hooks]
 # pre_workspace_create = ""

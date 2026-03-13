@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/hanz/island/internal/agent"
@@ -71,12 +72,24 @@ func (w *WorkspaceViewModel) Focus(ws *agent.Workspace, width, height int) {
 	}
 
 	// Populate viewport from the active session's output.
-	w.viewport.SetContent(sessionContent(sess, w.spinnerFrame))
+	w.viewport.SetContent(sessionContent(sess, w.spinnerFrame, w.viewport.Width))
 	if w.autoScroll {
 		w.viewport.GotoBottom()
 	}
 
 	w.input.Width = width - 4
+
+	if ws.Archived {
+		w.input.Placeholder = ""
+		w.input.Blur()
+		return
+	} else if ws.WorktreePath == "" {
+		w.input.Placeholder = "What would you like to work on?"
+	} else if sess != nil && sess.Task == "" {
+		w.input.Placeholder = "What should this agent work on?"
+	} else {
+		w.input.Placeholder = "Send follow-up..."
+	}
 
 	w.input.Focus()
 }
@@ -96,7 +109,7 @@ func (w *WorkspaceViewModel) Update(msg tea.Msg, ws *agent.Workspace) tea.Cmd {
 		if newWSID != w.lastWSID || newSessID != w.lastSessID {
 			w.lastWSID = newWSID
 			w.lastSessID = newSessID
-			w.viewport.SetContent(sessionContent(sess, w.spinnerFrame))
+			w.viewport.SetContent(sessionContent(sess, w.spinnerFrame, w.viewport.Width))
 			w.autoScroll = true
 			w.viewport.GotoBottom()
 		}
@@ -157,7 +170,7 @@ func (w *WorkspaceViewModel) UpdateOutput(ws *agent.Workspace) {
 		return
 	}
 	sess := ws.ActiveSession()
-	w.viewport.SetContent(sessionContent(sess, w.spinnerFrame))
+	w.viewport.SetContent(sessionContent(sess, w.spinnerFrame, w.viewport.Width))
 	if w.autoScroll {
 		w.viewport.GotoBottom()
 	}
@@ -182,7 +195,10 @@ func (w *WorkspaceViewModel) View(ws *agent.Workspace, width, height int) string
 
 	// Resize viewport if dimensions changed.
 	headerHeight := 2
-	inputHeight := 3
+	inputHeight := 0
+	if !ws.Archived {
+		inputHeight = 3
+	}
 	vpHeight := height - headerHeight - inputHeight
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -192,10 +208,12 @@ func (w *WorkspaceViewModel) View(ws *agent.Workspace, width, height int) string
 		w.viewport.Height = vpHeight
 	}
 	b.WriteString(w.viewport.View())
-	b.WriteByte('\n')
 
-	// Always show the input bar.
-	b.WriteString(inputStyle.Width(width - 2).Render(w.input.View()))
+	// Show input bar only for non-archived workspaces.
+	if !ws.Archived {
+		b.WriteByte('\n')
+		b.WriteString(inputStyle.Width(width - 2).Render(w.input.View()))
+	}
 
 	return b.String()
 }
@@ -220,7 +238,16 @@ func (w *WorkspaceViewModel) renderSessionHeader(ws *agent.Workspace, width int)
 			}
 			icon = statusIconFor(sess.Status, w.spinnerFrame)
 		}
-		left := headerStyle.Render(taskName)
+
+		// Show PR badge or archived badge when applicable.
+		var badge string
+		if ws.Archived {
+			badge = archivedStyle.Render(" [archived]")
+		} else if ws.PRNumber > 0 {
+			badge = inReviewStyle.Render(fmt.Sprintf(" [PR #%d]", ws.PRNumber))
+		}
+
+		left := headerStyle.Render(taskName) + badge
 		right := footerStyle.Render(agentName) + " " + icon
 
 		gap := width - lipgloss.Width(left) - lipgloss.Width(right)
@@ -258,14 +285,65 @@ func (w *WorkspaceViewModel) renderSessionHeader(ws *agent.Workspace, width int)
 }
 
 // sessionContent joins all output lines from a session for display in the
-// viewport. Appends a thinking indicator when the agent is active, or a
-// completion/error indicator when done.
-func sessionContent(sess *agent.Session, spinnerFrame int) string {
+// viewport. Text content from LLM is rendered as markdown with syntax
+// highlighting; tool indicators are preserved as-is. Appends a thinking
+// indicator when the agent is active, or a completion/error indicator when done.
+func sessionContent(sess *agent.Session, spinnerFrame int, width int) string {
 	if sess == nil || sess.Output == nil {
 		return ""
 	}
 	lines := sess.Output.Lines()
-	content := strings.Join(lines, "\n")
+
+	// Show greeting for new sessions waiting for their first message.
+	if len(lines) == 0 && sess.Status == agent.StatusWaiting {
+		return footerStyle.Render("How can I help you today?")
+	}
+
+	// Separate tool indicator lines from text content so we can render
+	// the text through glamour while keeping tool lines styled separately.
+	type segment struct {
+		isToolLine bool
+		lines      []string
+	}
+	var segments []segment
+	var currentText []string
+
+	flushText := func() {
+		if len(currentText) > 0 {
+			segments = append(segments, segment{isToolLine: false, lines: currentText})
+			currentText = nil
+		}
+	}
+
+	for _, line := range lines {
+		if isToolIndicator(line) {
+			flushText()
+			segments = append(segments, segment{isToolLine: true, lines: []string{line}})
+		} else {
+			currentText = append(currentText, line)
+		}
+	}
+	flushText()
+
+	// Build final content by rendering text segments as markdown.
+	var b strings.Builder
+	for i, seg := range segments {
+		if seg.isToolLine {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(toolLineStyle.Render(seg.lines[0]))
+		} else {
+			text := strings.Join(seg.lines, "\n")
+			rendered := renderMarkdown(text, width)
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(rendered)
+		}
+	}
+
+	content := b.String()
 
 	// Append status indicator based on session state.
 	switch sess.Status {
@@ -282,5 +360,57 @@ func sessionContent(sess *agent.Session, spinnerFrame int) string {
 		content += "\n" + erroredStyle.Render("\u2717 "+errMsg)
 	}
 
+	return content
+}
+
+// isToolIndicator returns true for lines generated by the stream parser
+// for tool calls and results (e.g. "  ● Read(file)" or "  ✓ Done (...)").
+func isToolIndicator(line string) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	return strings.HasPrefix(trimmed, "● ") || strings.HasPrefix(trimmed, "✓ ")
+}
+
+// renderMarkdown renders text content as terminal-styled markdown using glamour.
+// Falls back to the raw content if rendering fails.
+func renderMarkdown(content string, width int) string {
+	if strings.TrimSpace(content) == "" {
+		return content
+	}
+	if width <= 0 {
+		width = 80
+	}
+
+	// Close unclosed code fences that may occur during streaming.
+	content = closeUnclosedFences(content)
+
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return content
+	}
+
+	rendered, err := r.Render(content)
+	if err != nil {
+		return content
+	}
+
+	return strings.TrimRight(rendered, "\n")
+}
+
+// closeUnclosedFences detects unmatched code fences (```) that occur during
+// streaming and appends a closing fence so glamour renders correctly.
+func closeUnclosedFences(content string) string {
+	fenceCount := 0
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			fenceCount++
+		}
+	}
+	if fenceCount%2 != 0 {
+		content += "\n```"
+	}
 	return content
 }

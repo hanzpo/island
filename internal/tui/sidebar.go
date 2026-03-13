@@ -57,13 +57,20 @@ func (s *SidebarModel) View(workspaces []*agent.Workspace, selected int, width, 
 		var line string
 		if i == selected {
 			label := "\u25b8 " + name
-			// Pad to fill width so the highlight background covers the line.
 			padded := label + strings.Repeat(" ", max(0, width-3-lipgloss.Width(label)-lipgloss.Width(icon))) + icon
-			line = sidebarActiveStyle.Render(padded)
+			if ws.Archived {
+				line = archivedStyle.Bold(true).Render(padded)
+			} else {
+				line = sidebarActiveStyle.Render(padded)
+			}
 		} else {
 			label := "  " + name
 			padded := label + strings.Repeat(" ", max(0, width-3-lipgloss.Width(label)-lipgloss.Width(icon))) + icon
-			line = sidebarItemStyle.Render(padded)
+			if ws.Archived {
+				line = archivedStyle.Render(padded)
+			} else {
+				line = sidebarItemStyle.Render(padded)
+			}
 		}
 
 		b.WriteString(line)
@@ -108,6 +115,10 @@ func statusIconFor(s agent.WorkspaceStatus, frame int) string {
 		return lipgloss.NewStyle().Faint(true).Render("\u25cc")
 	case agent.StatusMerging:
 		return runningStyle.Render("\u27f3")
+	case agent.StatusInReview:
+		return inReviewStyle.Render("\u25c9")
+	case agent.StatusArchived:
+		return archivedStyle.Render("\u2713")
 	default:
 		return "?"
 	}

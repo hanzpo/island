@@ -129,6 +129,11 @@ var (
 				Foreground(primaryColor).
 				Padding(0, 1)
 
+	// Tool indicator lines (● Read, ✓ Done, etc.)
+	toolLineStyle = lipgloss.NewStyle().
+			Foreground(secondaryColor).
+			Faint(true)
+
 	// Thinking / chain-of-thought
 	thinkingStyle = lipgloss.NewStyle().
 			Faint(true).
@@ -141,4 +146,13 @@ var (
 	userMsgStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("39")).
 			Bold(true)
+
+	// In-review style
+	inReviewStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("99")) // purple
+
+	// Archived style
+	archivedStyle = lipgloss.NewStyle().
+			Faint(true).
+			Foreground(secondaryColor)
 )

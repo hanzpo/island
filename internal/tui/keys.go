@@ -10,6 +10,7 @@ type MainKeyMap struct {
 	New         key.Binding
 	AddAgent    key.Binding
 	Diff        key.Binding
+	CreatePR    key.Binding
 	Merge       key.Binding
 	Discard     key.Binding
 	NextSession key.Binding
@@ -72,6 +73,10 @@ func defaultMainKeys() MainKeyMap {
 		Diff: key.NewBinding(
 			key.WithKeys("ctrl+d"),
 			key.WithHelp("ctrl+d", "view diff"),
+		),
+		CreatePR: key.NewBinding(
+			key.WithKeys("ctrl+p"),
+			key.WithHelp("ctrl+p", "create PR"),
 		),
 		Merge: key.NewBinding(
 			key.WithKeys("ctrl+m"),

@@ -107,13 +107,12 @@ func newDialogModel(cfg *config.Config) DialogModel {
 func (d *DialogModel) Open() {
 	d.open = true
 	d.mode = ModeNewWorkspace
-	d.activeField = FieldTask
+	d.activeField = FieldAgent
 	d.confirmed = false
 	d.agentName = ""
 	d.templateName = ""
 	d.taskText = ""
-	d.taskInput.SetValue("")
-	d.taskInput.Focus()
+	d.taskInput.Blur()
 
 	// Reset agent to default.
 	d.agentIdx = 0
@@ -203,26 +202,17 @@ func (d *DialogModel) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (d *DialogModel) tryConfirm() tea.Cmd {
-	if d.mode == ModeAddAgent {
-		if len(d.agents) > 0 {
-			d.agentName = d.agents[d.agentIdx]
-		}
-		d.confirmed = true
-		d.open = false
-		return nil
+	if len(d.agents) > 0 {
+		d.agentName = d.agents[d.agentIdx]
 	}
 
-	value := strings.TrimSpace(d.taskInput.Value())
-	if value != "" {
-		d.taskText = value
-		if len(d.agents) > 0 {
-			d.agentName = d.agents[d.agentIdx]
-		}
+	if d.mode == ModeNewWorkspace {
 		d.templateName = d.templates[d.templateIdx]
-		d.confirmed = true
-		d.open = false
-		d.taskInput.Blur()
 	}
+
+	d.confirmed = true
+	d.open = false
+	d.taskInput.Blur()
 	return nil
 }
 
@@ -231,16 +221,12 @@ func (d *DialogModel) cycleField() tea.Cmd {
 		// Only the agent field is available.
 		return nil
 	}
+	// ModeNewWorkspace: cycle between agent and template only.
 	switch d.activeField {
-	case FieldTask:
-		d.activeField = FieldAgent
-		d.taskInput.Blur()
 	case FieldAgent:
 		d.activeField = FieldTemplate
 	case FieldTemplate:
-		d.activeField = FieldTask
-		d.taskInput.Focus()
-		return textinput.Blink
+		d.activeField = FieldAgent
 	}
 	return nil
 }
@@ -288,19 +274,6 @@ func (d *DialogModel) View(width, height int) string {
 		b.WriteString(dialogTitleStyle.Render("New Workspace"))
 	}
 	b.WriteByte('\n')
-
-	// Task field (only in new-workspace mode).
-	if d.mode == ModeNewWorkspace {
-		taskLabel := "Task:"
-		if d.activeField == FieldTask {
-			taskLabel = selectedItemStyle.Render("Task:")
-		} else {
-			taskLabel = normalItemStyle.Render("Task:")
-		}
-		b.WriteString(taskLabel + " ")
-		b.WriteString(d.taskInput.View())
-		b.WriteString("\n\n")
-	}
 
 	// Agent field.
 	agentLabel := "Agent:"

@@ -3,8 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/hanz/island/internal/config"
 	"github.com/hanz/island/internal/git"
 	"github.com/hanz/island/internal/hooks"
+	"github.com/hanz/island/internal/state"
 )
 
 // Screen represents which top-level screen is currently displayed.
@@ -59,6 +60,22 @@ type TickMsg struct{}
 // AnimTickMsg drives the spinner animation at ~150ms intervals.
 type AnimTickMsg struct{}
 
+// WorkspaceRenameMsg is sent when the async Haiku naming call completes.
+type WorkspaceRenameMsg struct {
+	WorkspaceID string
+	NewName     string
+	NewBranch   string
+	Err         error
+}
+
+// PRCreateCompleteMsg is sent when a PR has been created (or failed).
+type PRCreateCompleteMsg struct {
+	WorkspaceID string
+	PRNumber    int
+	PRURL       string
+	Err         error
+}
+
 // App is the root Bubble Tea model that owns all state and routes to
 // sub-views. The main screen shows a left sidebar with the workspace list and
 // a right panel with the active workspace's output.
@@ -71,6 +88,10 @@ type App struct {
 	program    *tea.Program
 	repoRoot   string
 	repoName   string
+
+	// Persistence
+	statePath  string // .island/state.json
+	historyDir string // .island/history/
 
 	// State
 	screen     Screen
@@ -91,29 +112,40 @@ type App struct {
 	spinnerFrame int
 	animating    bool
 
-	// Quit
-	confirmQuit bool
+	// Confirmation prompts
+	confirmQuit    bool
+	confirmDiscard bool
 }
 
 // NewApp creates and initializes the root TUI model.
+// It restores persisted state from .island/ if available.
 func NewApp(cfg *config.Config, repoRoot string) *App {
 	gitMgr := git.NewManager(repoRoot, cfg.General.WorktreeDir)
 	hookRunner := hooks.NewRunner(repoRoot)
 	pool := agent.NewPool(cfg.General.MaxConcurrent)
 
-	return &App{
+	app := &App{
 		cfg:        cfg,
 		gitMgr:     gitMgr,
 		hookRunner: hookRunner,
 		pool:       pool,
 		repoRoot:   repoRoot,
 		repoName:   filepath.Base(repoRoot),
+		statePath:  filepath.Join(repoRoot, ".island", "state.json"),
+		historyDir: filepath.Join(repoRoot, ".island", "history"),
 		screen:     ScreenMain,
 		sidebar:    newSidebarModel(),
 		wsView:     newWorkspaceViewModel(),
 		dialog:     newDialogModel(cfg),
 		diffView:   newDiffViewModel(),
 	}
+
+	// Restore persisted state.
+	if s, err := state.Load(app.statePath); err == nil && s != nil {
+		app.restoreState(s)
+	}
+
+	return app
 }
 
 // SetProgram stores a reference to the tea.Program so that async goroutines
@@ -157,6 +189,12 @@ func (m *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DiscardCompleteMsg:
 		return m.handleDiscardComplete(msg)
 
+	case WorkspaceRenameMsg:
+		return m.handleWorkspaceRename(msg)
+
+	case PRCreateCompleteMsg:
+		return m.handlePRCreateComplete(msg)
+
 	case tea.MouseMsg:
 		return m.handleMouseMsg(msg)
 
@@ -185,6 +223,20 @@ func (m *App) View() string {
 			m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			dialogStyle.Render("Agents are still running. Quit anyway? (y/n)"),
+		)
+	}
+
+	// Discard confirmation overlay.
+	if m.confirmDiscard {
+		ws := m.selectedWorkspace()
+		name := "this workspace"
+		if ws != nil && ws.Name != "" {
+			name = ws.Name
+		}
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialogStyle.Render("Discard "+name+"? This will delete the worktree and branch. (y/n)"),
 		)
 	}
 
@@ -256,9 +308,26 @@ func (m *App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "Y":
 			m.pool.CancelAll()
+			m.saveState()
 			return m, tea.Quit
 		default:
 			m.confirmQuit = false
+			return m, nil
+		}
+	}
+
+	// Discard confirmation takes priority.
+	if m.confirmDiscard {
+		switch msg.String() {
+		case "y", "Y":
+			ws := m.selectedWorkspace()
+			m.confirmDiscard = false
+			if ws != nil {
+				return m, m.discardCmd(ws)
+			}
+			return m, nil
+		default:
+			m.confirmDiscard = false
 			return m, nil
 		}
 	}
@@ -273,33 +342,29 @@ func (m *App) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 			if m.dialog.mode == ModeAddAgent {
 				// Add a new agent session to the selected workspace.
+				// The session starts in waiting state — the user must
+				// send a prompt before the agent starts.
 				targetWS := m.selectedWorkspace()
 				if targetWS != nil {
-					sess := m.addSessionToWorkspace(targetWS, agentName)
+					m.addSessionToWorkspace(targetWS, agentName)
 					targetWS.ActiveIdx = len(targetWS.Sessions) - 1
 					m.focusSelected()
-					return m, tea.Batch(cmd, m.startSessionCmd(targetWS, sess))
+					m.saveState()
 				}
 				return m, cmd
 			}
 
-			// New workspace mode.
-			task := m.dialog.taskText
+			// New workspace mode — no agent starts yet. The user sends the
+			// first message in the workspace input bar, which triggers
+			// worktree creation and agent start.
 			templateName := m.dialog.templateName
-
-			// Create the workspace and session immediately so they are in
-			// m.workspaces before the runner starts sending OutputMsg/DoneMsg.
-			ws, sess := m.newWorkspace(agentName, task)
-
-			// Show the user's task immediately in the output.
-			sess.Output.Write(userMsgStyle.Render("❯ " + task))
-			sess.Output.Write("")
-
+			ws, _ := m.newWorkspace(agentName)
+			ws.TemplateName = templateName
 			m.workspaces = append(m.workspaces, ws)
 			m.selected = len(m.workspaces) - 1
 			m.focusSelected()
-
-			return m, tea.Batch(cmd, m.setupAndStartCmd(ws, sess, task, agentName, templateName), m.ensureAnimating())
+			m.saveState()
+			return m, cmd
 		}
 		return m, cmd
 	}
@@ -345,29 +410,79 @@ func (m *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.confirmQuit = true
 			return m, nil
 		}
+		m.saveState()
 		return m, tea.Quit
 
 	case key.Matches(msg, m.sidebar.keys.New):
+		// If only one agent and no templates, skip the dialog entirely.
+		if len(m.cfg.Agents) <= 1 && len(m.cfg.Templates) == 0 {
+			ws, _ := m.newWorkspace(m.cfg.General.DefaultAgent)
+			m.workspaces = append(m.workspaces, ws)
+			m.selected = len(m.workspaces) - 1
+			m.focusSelected()
+			m.saveState()
+			return m, nil
+		}
 		m.dialog.Open()
 		return m, nil
 
 	case key.Matches(msg, m.sidebar.keys.AddAgent):
-		if ws != nil {
+		if ws != nil && ws.WorktreePath != "" && !ws.Archived {
 			m.dialog.OpenAddAgent()
 		}
 		return m, nil
 
 	case key.Matches(msg, m.sidebar.keys.Diff):
-		if ws != nil {
+		if ws != nil && !ws.Archived {
 			return m, m.loadDiffCmd(ws)
 		}
 		return m, nil
 
-	case key.Matches(msg, m.sidebar.keys.Discard):
-		if ws != nil {
-			return m, m.discardCmd(ws)
+	case key.Matches(msg, m.sidebar.keys.CreatePR):
+		if ws != nil && ws.WorktreePath != "" && ws.PRNumber == 0 && !ws.Archived {
+			sess := ws.ActiveSession()
+			if sess != nil {
+				sess.Output.Write("")
+				sess.Output.Write(thinkingStyle.Render("Creating PR..."))
+				m.wsView.UpdateOutput(ws)
+			}
+			return m, m.createPRCmd(ws)
 		}
 		return m, nil
+
+	case key.Matches(msg, m.sidebar.keys.Discard):
+		if ws != nil && !ws.Archived {
+			m.confirmDiscard = true
+		}
+		return m, nil
+	}
+
+	// Archived workspaces are read-only — no input handling.
+	if ws != nil && ws.Archived {
+		// Only allow navigation keys for archived workspaces.
+		switch {
+		case key.Matches(msg, m.sidebar.keys.Up):
+			if len(m.workspaces) > 0 {
+				m.selected--
+				if m.selected < 0 {
+					m.selected = len(m.workspaces) - 1
+				}
+				m.focusSelected()
+			}
+			return m, nil
+		case key.Matches(msg, m.sidebar.keys.Down):
+			if len(m.workspaces) > 0 {
+				m.selected++
+				if m.selected >= len(m.workspaces) {
+					m.selected = 0
+				}
+				m.focusSelected()
+			}
+			return m, nil
+		}
+		// Pass navigation keys to workspace view.
+		cmd := m.wsView.Update(msg, ws)
+		return m, cmd
 	}
 
 	// Input-aware handling for the active workspace.
@@ -392,13 +507,42 @@ func (m *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 
 					// Show user message immediately in the output.
-					sess.Output.Write("")
+					if sess.Output.Len() > 0 {
+						sess.Output.Write("") // separator for follow-ups
+					}
 					sess.Output.Write(userMsgStyle.Render("❯ " + value))
 					sess.Output.Write("")
+					m.wsView.input.SetValue("")
+
+					if ws.WorktreePath == "" {
+						// First message in workspace — create worktree and start agent.
+						sess.Task = value
+						sess.Status = agent.StatusInitializing
+						m.wsView.input.Placeholder = "Send follow-up..."
+						m.wsView.UpdateOutput(ws)
+
+						agentName := ""
+						if sess.Agent != nil {
+							agentName = sess.Agent.Name
+						}
+						return m, tea.Batch(
+							m.setupAndStartCmd(ws, sess, value, agentName, ws.TemplateName),
+							m.ensureAnimating(),
+						)
+					}
+
+					if sess.Task == "" {
+						// First message for this session (worktree already exists).
+						sess.Task = value
+						sess.Status = agent.StatusRunning
+						m.wsView.input.Placeholder = "Send follow-up..."
+						m.wsView.UpdateOutput(ws)
+						return m, tea.Batch(m.startSessionCmd(ws, sess), m.ensureAnimating())
+					}
+
+					// Follow-up message to an existing session.
 					sess.Status = agent.StatusRunning
 					sess.TurnCount++
-
-					m.wsView.input.SetValue("")
 					m.wsView.UpdateOutput(ws)
 					return m, tea.Batch(m.sendFollowUpCmd(ws, sess, value), m.ensureAnimating())
 				}
@@ -415,7 +559,21 @@ func (m *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-		// Input is blurred. Any printable key re-focuses and types.
+		// Input is blurred — handle workspace-level keys before
+		// the catch-all that re-focuses the input.
+		if key.Matches(msg, m.wsView.keys.Cancel) {
+			if sess != nil && (sess.Status == agent.StatusRunning || sess.Status == agent.StatusInitializing) {
+				if sess.Cancel != nil {
+					sess.Cancel()
+				}
+				sess.Status = agent.StatusCancelled
+				m.wsView.UpdateOutput(ws)
+				m.saveState()
+			}
+			return m, nil
+		}
+
+		// Any other printable key re-focuses and types.
 		k := msg.String()
 		if len(k) == 1 && k[0] >= 32 && k[0] < 127 {
 			m.wsView.input.Focus()
@@ -428,8 +586,20 @@ func (m *App) handleMainKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Ctrl+M (merge) which shares a key code with Enter.
 	switch {
 	case key.Matches(msg, m.sidebar.keys.Merge):
-		if ws != nil && (ws.Status() == agent.StatusCompleted || ws.Status() == agent.StatusWaiting) {
-			return m, m.mergeCmd(ws)
+		if ws != nil && !ws.Archived {
+			if ws.PRNumber > 0 {
+				// Merge the GitHub PR.
+				sess := ws.ActiveSession()
+				if sess != nil {
+					sess.Output.Write("")
+					sess.Output.Write(thinkingStyle.Render("Merging PR..."))
+					m.wsView.UpdateOutput(ws)
+				}
+				return m, m.mergePRCmd(ws)
+			} else if ws.Status() == agent.StatusCompleted || ws.Status() == agent.StatusWaiting {
+				// Local merge (no PR).
+				return m, m.mergeCmd(ws)
+			}
 		}
 		return m, nil
 
@@ -479,7 +649,8 @@ func (m *App) handleDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.diffView.keys.Discard):
 		ws := m.findWorkspace(m.diffView.workspaceID)
 		if ws != nil {
-			return m, m.discardCmd(ws)
+			m.confirmDiscard = true
+			m.screen = ScreenMain
 		}
 		return m, nil
 	}
@@ -603,6 +774,7 @@ func (m *App) handleDoneMsg(msg agent.DoneMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	m.saveState()
 	return m, nil
 }
 
@@ -621,11 +793,35 @@ func (m *App) handleDiffReady(msg DiffReadyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *App) handleMergeComplete(msg MergeCompleteMsg) (tea.Model, tea.Cmd) {
+	ws := m.findWorkspace(msg.WorkspaceID)
 	if msg.Err != nil {
+		// Show error to user.
+		if ws != nil {
+			sess := ws.ActiveSession()
+			if sess != nil {
+				sess.Output.Write(erroredStyle.Render("Merge failed: " + msg.Err.Error()))
+				m.wsView.UpdateOutput(ws)
+			}
+		}
 		return m, nil
 	}
-	m.removeWorkspace(msg.WorkspaceID)
+
+	if ws != nil && ws.PRNumber > 0 {
+		// PR merge: archive the workspace.
+		ws.Archived = true
+		ws.WorktreePath = ""
+		sess := ws.ActiveSession()
+		if sess != nil {
+			sess.Output.Write("")
+			sess.Output.Write(completedStyle.Render(fmt.Sprintf("\u2713 PR #%d merged and workspace archived", ws.PRNumber)))
+		}
+	} else {
+		// Local merge: remove workspace entirely.
+		m.removeWorkspace(msg.WorkspaceID)
+	}
+
 	m.screen = ScreenMain
+	m.saveState()
 	return m, nil
 }
 
@@ -633,8 +829,11 @@ func (m *App) handleDiscardComplete(msg DiscardCompleteMsg) (tea.Model, tea.Cmd)
 	if msg.Err != nil {
 		return m, nil
 	}
+	// Remove history files for the discarded workspace.
+	_ = state.RemoveHistory(m.historyDir, msg.WorkspaceID)
 	m.removeWorkspace(msg.WorkspaceID)
 	m.screen = ScreenMain
+	m.saveState()
 	return m, nil
 }
 
@@ -661,18 +860,13 @@ func (m *App) propagateToScreen(msg tea.Msg) (tea.Model, tea.Cmd) {
 // workspace is added to m.workspaces by the caller so that it exists before
 // any async runner messages arrive, eliminating the race where OutputMsg /
 // DoneMsg are silently dropped because findWorkspace returns nil.
-func (m *App) newWorkspace(agentName, task string) (*agent.Workspace, *agent.Session) {
+func (m *App) newWorkspace(agentName string) (*agent.Workspace, *agent.Session) {
 	wsID := fmt.Sprintf("ws-%d", time.Now().UnixNano())
 	sessID := fmt.Sprintf("sess-%d", time.Now().UnixNano())
 
-	// Derive workspace name from task (first ~30 chars).
-	wsName := task
-	if len(wsName) > 30 {
-		wsName = wsName[:30]
-		if idx := strings.LastIndex(wsName, " "); idx > 10 {
-			wsName = wsName[:idx]
-		}
-	}
+	// Use a random city name as a placeholder until Haiku generates a
+	// descriptive name from the first prompt.
+	wsName := agent.PickCityName()
 
 	acfg := m.cfg.Agents[agentName]
 	agentDef := agent.AgentDefFromConfig(agentName, acfg)
@@ -681,8 +875,7 @@ func (m *App) newWorkspace(agentName, task string) (*agent.Workspace, *agent.Ses
 	sess := &agent.Session{
 		ID:        sessID,
 		Agent:     agentDef,
-		Task:      task,
-		Status:    agent.StatusInitializing,
+		Status:    agent.StatusWaiting,
 		Output:    agent.NewRingBuffer(bufSize),
 		Stderr:    agent.NewRingBuffer(bufSize),
 		CreatedAt: time.Now(),
@@ -709,6 +902,7 @@ func (m *App) newWorkspace(agentName, task string) (*agent.Workspace, *agent.Ses
 func (m *App) setupAndStartCmd(ws *agent.Workspace, sess *agent.Session, task, agentName, templateName string) tea.Cmd {
 	wsID := ws.ID
 	sessID := sess.ID
+	cityName := ws.Name // capture city name for branch slug
 
 	return func() tea.Msg {
 		// Use a timeout for pool acquisition so we never block forever.
@@ -738,12 +932,11 @@ func (m *App) setupAndStartCmd(ws *agent.Workspace, sess *agent.Session, task, a
 		// From here on, a pool slot is held. On error we return a DoneMsg
 		// and let handleDoneMsg release the slot.
 
-		// Sanitize task for branch name.
-		slug := sanitizeSlug(task)
+		// Use city name for the initial branch (renamed async by Haiku).
 		ctx := context.Background()
 
 		// Create git worktree.
-		branch, worktreePath, err := m.gitMgr.Create(ctx, m.cfg.General.BaseBranch, slug)
+		branch, worktreePath, err := m.gitMgr.Create(ctx, m.cfg.General.BaseBranch, cityName)
 		if err != nil {
 			return fail(fmt.Errorf("creating worktree: %w", err))
 		}
@@ -814,31 +1007,49 @@ func (m *App) setupAndStartCmd(ws *agent.Workspace, sess *agent.Session, task, a
 		// Run post_workspace_create hook.
 		_, _ = m.hookRunner.Run(ctx, m.cfg.Hooks.PostWorkspaceCreate, hookEnv, worktreePath)
 
+		// Async: call Haiku to generate a descriptive name and rename the branch.
+		gitMgr := m.gitMgr
+		go func() {
+			rCtx, rCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer rCancel()
+
+			name, err := agent.GenerateBranchName(rCtx, prompt)
+			if err != nil {
+				return // keep city name
+			}
+
+			newBranch := rebuildBranchName(branch, name)
+			if err := gitMgr.RenameBranch(rCtx, branch, newBranch); err != nil {
+				return
+			}
+
+			if prog != nil {
+				prog.Send(WorkspaceRenameMsg{
+					WorkspaceID: wsID,
+					NewName:     name,
+					NewBranch:   newBranch,
+				})
+			}
+		}()
+
 		return nil
 	}
 }
 
 // addSessionToWorkspace creates a new Session for the given agent and appends
-// it to the workspace's session list. The session uses the workspace's existing
-// task as its own.
+// it to the workspace's session list. The session starts in waiting state with
+// no task — the user must send a prompt to start the agent.
 func (m *App) addSessionToWorkspace(ws *agent.Workspace, agentName string) *agent.Session {
 	sessID := fmt.Sprintf("sess-%d", time.Now().UnixNano())
 
 	acfg := m.cfg.Agents[agentName]
 	agentDef := agent.AgentDefFromConfig(agentName, acfg)
 
-	// Reuse the first session's task as the prompt for the new agent.
-	task := ""
-	if len(ws.Sessions) > 0 {
-		task = ws.Sessions[0].Task
-	}
-
 	bufSize := m.cfg.General.OutputBufferSize
 	sess := &agent.Session{
 		ID:        sessID,
 		Agent:     agentDef,
-		Task:      task,
-		Status:    agent.StatusInitializing,
+		Status:    agent.StatusWaiting,
 		Output:    agent.NewRingBuffer(bufSize),
 		Stderr:    agent.NewRingBuffer(bufSize),
 		CreatedAt: time.Now(),
@@ -1185,22 +1396,299 @@ func (m *App) renderFooter() string {
 	var hints string
 	switch m.screen {
 	case ScreenMain:
-		hints = "^n: new  ^a: add agent  tab: switch agent  ^d: diff  ^m: merge  ^x: discard  ^c: quit"
+		ws := m.selectedWorkspace()
+		if ws != nil && ws.Archived {
+			hints = "^n: new  up/down: navigate  ^c: quit"
+		} else if ws != nil && ws.PRNumber > 0 {
+			hints = "^n: new  ^a: agent  tab: switch  ^d: diff  ^m: merge PR  ^x: discard  ^c: quit"
+		} else {
+			hints = "^n: new  ^a: agent  tab: switch  ^d: diff  ^p: create PR  ^m: merge  ^x: discard  ^c: quit"
+		}
 	case ScreenDiff:
-		hints = "m: merge  x: discard  esc: back"
+		hints = "esc: back  m: merge  x: discard"
 	}
 	return footerStyle.Render(hints)
 }
 
-// sanitizeSlug converts a task description into a branch-name-safe slug.
-func sanitizeSlug(s string) string {
-	s = strings.ToLower(s)
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	s = re.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-	if len(s) > 50 {
-		s = s[:50]
-		s = strings.TrimRight(s, "-")
+// handleWorkspaceRename updates the workspace display name and branch after
+// Haiku generates a descriptive name.
+func (m *App) handleWorkspaceRename(msg WorkspaceRenameMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		return m, nil
 	}
+	ws := m.findWorkspace(msg.WorkspaceID)
+	if ws == nil {
+		return m, nil
+	}
+	ws.Name = msg.NewName
+	ws.Branch = msg.NewBranch
+	m.saveState()
+	return m, nil
+}
+
+// --- PR Workflow ---
+
+// createPRCmd pushes the branch and creates a GitHub PR.
+func (m *App) createPRCmd(ws *agent.Workspace) tea.Cmd {
+	wsID := ws.ID
+	branch := ws.Branch
+	baseBranch := m.cfg.General.BaseBranch
+	wsName := ws.Name
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Push branch to remote.
+		if err := m.gitMgr.Push(ctx, branch); err != nil {
+			return PRCreateCompleteMsg{WorkspaceID: wsID, Err: err}
+		}
+
+		// Generate title and body from commit log.
+		title, body, err := m.gitMgr.GeneratePRDescription(ctx, baseBranch, branch)
+		if err != nil || title == "" {
+			title = wsName
+		}
+
+		// Create PR.
+		pr, err := m.gitMgr.CreatePR(ctx, branch, baseBranch, title, body)
+		if err != nil {
+			return PRCreateCompleteMsg{WorkspaceID: wsID, Err: err}
+		}
+
+		return PRCreateCompleteMsg{
+			WorkspaceID: wsID,
+			PRNumber:    pr.Number,
+			PRURL:       pr.URL,
+		}
+	}
+}
+
+// mergePRCmd merges a PR via GitHub, cleans up, and archives.
+func (m *App) mergePRCmd(ws *agent.Workspace) tea.Cmd {
+	wsID := ws.ID
+	prNumber := ws.PRNumber
+	worktreePath := ws.WorktreePath
+	baseBranch := m.cfg.General.BaseBranch
+
+	agentName := ""
+	if sess := ws.ActiveSession(); sess != nil && sess.Agent != nil {
+		agentName = sess.Agent.Name
+	}
+
+	hookEnv := hooks.Env{
+		WorkspaceID:  wsID,
+		Branch:       ws.Branch,
+		Agent:        agentName,
+		WorktreePath: worktreePath,
+		RepoRoot:     m.repoRoot,
+	}
+
+	return func() tea.Msg {
+		ctx := context.Background()
+
+		// Run pre_merge hook.
+		if _, err := m.hookRunner.Run(ctx, m.cfg.Hooks.PreMerge, hookEnv, worktreePath); err != nil {
+			return MergeCompleteMsg{WorkspaceID: wsID, Err: err}
+		}
+
+		// Merge PR on GitHub.
+		if err := m.gitMgr.MergePR(ctx, prNumber); err != nil {
+			return MergeCompleteMsg{WorkspaceID: wsID, Err: err}
+		}
+
+		// Remove local worktree (branch already deleted by --delete-branch).
+		if worktreePath != "" {
+			_ = m.gitMgr.Remove(ctx, worktreePath)
+		}
+
+		// Pull latest on base branch.
+		_ = m.gitMgr.PullBase(ctx, baseBranch)
+
+		// Run post_merge hook.
+		_, _ = m.hookRunner.Run(ctx, m.cfg.Hooks.PostMerge, hookEnv, m.repoRoot)
+
+		return MergeCompleteMsg{WorkspaceID: wsID}
+	}
+}
+
+// handlePRCreateComplete handles the result of creating a PR.
+func (m *App) handlePRCreateComplete(msg PRCreateCompleteMsg) (tea.Model, tea.Cmd) {
+	ws := m.findWorkspace(msg.WorkspaceID)
+	if ws == nil {
+		return m, nil
+	}
+
+	if msg.Err != nil {
+		sess := ws.ActiveSession()
+		if sess != nil {
+			sess.Output.Write(erroredStyle.Render("PR creation failed: " + msg.Err.Error()))
+			m.wsView.UpdateOutput(ws)
+		}
+		return m, nil
+	}
+
+	ws.PRNumber = msg.PRNumber
+	ws.PRURL = msg.PRURL
+
+	sess := ws.ActiveSession()
+	if sess != nil {
+		sess.Output.Write(completedStyle.Render(fmt.Sprintf("\u2713 PR #%d created: %s", msg.PRNumber, msg.PRURL)))
+		m.wsView.UpdateOutput(ws)
+	}
+
+	m.saveState()
+	return m, nil
+}
+
+// --- State Persistence ---
+
+// saveState persists the current state and chat history to disk.
+func (m *App) saveState() {
+	s := m.buildState()
+	if err := state.Save(m.statePath, s); err != nil {
+		return // silently ignore save errors
+	}
+
+	// Save chat history for each session.
+	for _, ws := range m.workspaces {
+		for _, sess := range ws.Sessions {
+			if sess.Output == nil {
+				continue
+			}
+			lines := sess.Output.Lines()
+			if len(lines) > 0 {
+				_ = state.SaveHistory(m.historyDir, ws.ID, sess.ID, lines)
+			}
+		}
+	}
+}
+
+// buildState serializes the current app state into a persistable format.
+func (m *App) buildState() *state.IslandState {
+	s := &state.IslandState{
+		SelectedWorkspace: m.selected,
+	}
+
+	for _, ws := range m.workspaces {
+		wss := state.WorkspaceState{
+			ID:               ws.ID,
+			Name:             ws.Name,
+			Branch:           ws.Branch,
+			WorktreePath:     ws.WorktreePath,
+			TemplateName:     ws.TemplateName,
+			PRNumber:         ws.PRNumber,
+			PRURL:            ws.PRURL,
+			Archived:         ws.Archived,
+			ActiveSessionIdx: ws.ActiveIdx,
+			CreatedAt:        ws.CreatedAt,
+			UpdatedAt:        ws.UpdatedAt,
+		}
+
+		for _, sess := range ws.Sessions {
+			agentName := ""
+			if sess.Agent != nil {
+				agentName = sess.Agent.Name
+			}
+			ss := state.SessionState{
+				ID:        sess.ID,
+				AgentName: agentName,
+				Task:      sess.Task,
+				Status:    sess.Status.String(),
+				TurnCount: sess.TurnCount,
+				ExitCode:  sess.ExitCode,
+				CreatedAt: sess.CreatedAt,
+				UpdatedAt: sess.UpdatedAt,
+			}
+			wss.Sessions = append(wss.Sessions, ss)
+		}
+
+		s.Workspaces = append(s.Workspaces, wss)
+	}
+
 	return s
+}
+
+// restoreState rebuilds workspaces from persisted state.
+func (m *App) restoreState(s *state.IslandState) {
+	for _, wss := range s.Workspaces {
+		// Verify worktree still exists for non-archived workspaces.
+		if wss.WorktreePath != "" && !wss.Archived {
+			if _, err := os.Stat(wss.WorktreePath); os.IsNotExist(err) {
+				continue // worktree gone, skip
+			}
+		}
+
+		ws := &agent.Workspace{
+			ID:           wss.ID,
+			Name:         wss.Name,
+			Branch:       wss.Branch,
+			WorktreePath: wss.WorktreePath,
+			TemplateName: wss.TemplateName,
+			PRNumber:     wss.PRNumber,
+			PRURL:        wss.PRURL,
+			Archived:     wss.Archived,
+			ActiveIdx:    wss.ActiveSessionIdx,
+			CreatedAt:    wss.CreatedAt,
+			UpdatedAt:    wss.UpdatedAt,
+		}
+
+		for _, ss := range wss.Sessions {
+			acfg, ok := m.cfg.Agents[ss.AgentName]
+			if !ok {
+				continue // skip sessions with unknown agent type
+			}
+			agentDef := agent.AgentDefFromConfig(ss.AgentName, acfg)
+
+			bufSize := m.cfg.General.OutputBufferSize
+			sess := &agent.Session{
+				ID:        ss.ID,
+				Agent:     agentDef,
+				Task:      ss.Task,
+				Status:    agent.ParseStatus(ss.Status),
+				TurnCount: ss.TurnCount,
+				ExitCode:  ss.ExitCode,
+				Output:    agent.NewRingBuffer(bufSize),
+				Stderr:    agent.NewRingBuffer(bufSize),
+				CreatedAt: ss.CreatedAt,
+				UpdatedAt: ss.UpdatedAt,
+			}
+
+			// Restore chat history into ring buffer.
+			lines, err := state.LoadHistory(m.historyDir, wss.ID, ss.ID)
+			if err == nil && len(lines) > 0 {
+				for _, line := range lines {
+					sess.Output.Write(line)
+				}
+			}
+
+			// Interrupted sessions (were running when island closed) become waiting.
+			if sess.Status == agent.StatusRunning || sess.Status == agent.StatusInitializing {
+				sess.Status = agent.StatusWaiting
+			}
+
+			ws.Sessions = append(ws.Sessions, sess)
+		}
+
+		m.workspaces = append(m.workspaces, ws)
+	}
+
+	m.selected = s.SelectedWorkspace
+	if m.selected >= len(m.workspaces) && len(m.workspaces) > 0 {
+		m.selected = len(m.workspaces) - 1
+	}
+}
+
+// rebuildBranchName replaces the slug portion of a branch name.
+// Given "island/<timestamp>-<old>" and a new slug, returns "island/<timestamp>-<new>".
+func rebuildBranchName(oldBranch, newSlug string) string {
+	const prefix = "island/"
+	if !strings.HasPrefix(oldBranch, prefix) {
+		return oldBranch
+	}
+	rest := oldBranch[len(prefix):]
+	dashIdx := strings.Index(rest, "-")
+	if dashIdx < 0 {
+		return oldBranch
+	}
+	return prefix + rest[:dashIdx] + "-" + newSlug
 }

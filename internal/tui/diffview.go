@@ -112,7 +112,7 @@ func (d *DiffViewModel) View(width, height int) string {
 	b.WriteByte('\n')
 
 	// Footer.
-	footer := footerStyle.Render("  m: merge  x: discard  esc: back")
+	footer := footerStyle.Render("  esc: back  m: merge  x: discard")
 	b.WriteString(footer)
 
 	return b.String()
