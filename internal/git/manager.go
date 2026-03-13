@@ -143,6 +143,24 @@ func (m *Manager) List(ctx context.Context) ([]WorktreeInfo, error) {
 	return worktrees, nil
 }
 
+// RenameBranch renames oldBranch to newBranch using git branch -m.
+func (m *Manager) RenameBranch(ctx context.Context, oldBranch, newBranch string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cmd := exec.CommandContext(ctx, "git", "branch", "-m", oldBranch, newBranch)
+	cmd.Dir = m.repoRoot
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git branch -m: %w: %s", err, stderr.String())
+	}
+
+	return nil
+}
+
 // Prune prunes stale worktree entries.
 func (m *Manager) Prune(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "git", "worktree", "prune")

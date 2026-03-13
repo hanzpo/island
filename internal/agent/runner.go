@@ -21,6 +21,8 @@ const (
 	StatusErrored
 	StatusCancelled
 	StatusMerging
+	StatusInReview
+	StatusArchived
 )
 
 // String returns a human-readable representation of the workspace status.
@@ -40,8 +42,38 @@ func (s WorkspaceStatus) String() string {
 		return "cancelled"
 	case StatusMerging:
 		return "merging"
+	case StatusInReview:
+		return "in_review"
+	case StatusArchived:
+		return "archived"
 	default:
 		return "unknown"
+	}
+}
+
+// ParseStatus converts a string status back to a WorkspaceStatus.
+func ParseStatus(s string) WorkspaceStatus {
+	switch s {
+	case "initializing":
+		return StatusInitializing
+	case "running":
+		return StatusRunning
+	case "waiting":
+		return StatusWaiting
+	case "completed":
+		return StatusCompleted
+	case "errored":
+		return StatusErrored
+	case "cancelled":
+		return StatusCancelled
+	case "merging":
+		return StatusMerging
+	case "in_review":
+		return StatusInReview
+	case "archived":
+		return StatusArchived
+	default:
+		return StatusWaiting
 	}
 }
 
@@ -65,11 +97,15 @@ type Session struct {
 // and potentially multiple agent sessions.
 type Workspace struct {
 	ID           string
-	Name         string // display name derived from task
+	Name         string // display name (city name, then Haiku-generated)
 	Branch       string
 	WorktreePath string
+	TemplateName string // template to apply to first prompt
 	Sessions     []*Session
 	ActiveIdx    int // index of focused session in TUI
+	PRNumber     int    // GitHub PR number, 0 if no PR
+	PRURL        string // GitHub PR URL
+	Archived     bool   // workspace has been merged/archived
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -83,9 +119,17 @@ func (w *Workspace) ActiveSession() *Session {
 }
 
 // Status returns the "most active" status across all sessions.
-// Priority: Running > Initializing > Waiting > Completed > Errored > Cancelled
+// Workspace-level states (Archived, InReview) take priority when no
+// sessions are actively running.
 func (w *Workspace) Status() WorkspaceStatus {
+	if w.Archived {
+		return StatusArchived
+	}
+
 	if len(w.Sessions) == 0 {
+		if w.PRNumber > 0 {
+			return StatusInReview
+		}
 		return StatusInitializing
 	}
 
@@ -123,6 +167,12 @@ func (w *Workspace) Status() WorkspaceStatus {
 	if hasInitializing {
 		return StatusInitializing
 	}
+
+	// If workspace has a PR and no active sessions, show in review.
+	if w.PRNumber > 0 {
+		return StatusInReview
+	}
+
 	if hasWaiting {
 		return StatusWaiting
 	}
