@@ -5,9 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // WorkspaceStatus represents the current state of a workspace or session.
@@ -97,16 +100,16 @@ type Session struct {
 // and potentially multiple agent sessions.
 type Workspace struct {
 	ID           string
-	Name         string // display name (city name, then Haiku-generated)
+	Name         string
 	Branch       string
 	WorktreePath string
-	TemplateName string // template to apply to first prompt
+	TemplateName string
 	Sessions     []*Session
-	ActiveIdx    int // index of focused session in TUI
-	PRNumber     int    // GitHub PR number, 0 if no PR
-	PRURL        string // GitHub PR URL
-	Archived     bool   // workspace has been merged/archived
-	CreatedAt    time.Time
+	ActiveIdx    int
+	PRNumber  int
+	PRURL     string
+	Archived  bool
+	CreatedAt time.Time
 	UpdatedAt    time.Time
 }
 
@@ -119,8 +122,6 @@ func (w *Workspace) ActiveSession() *Session {
 }
 
 // Status returns the "most active" status across all sessions.
-// Workspace-level states (Archived, InReview) take priority when no
-// sessions are actively running.
 func (w *Workspace) Status() WorkspaceStatus {
 	if w.Archived {
 		return StatusArchived
@@ -167,12 +168,9 @@ func (w *Workspace) Status() WorkspaceStatus {
 	if hasInitializing {
 		return StatusInitializing
 	}
-
-	// If workspace has a PR and no active sessions, show in review.
 	if w.PRNumber > 0 {
 		return StatusInReview
 	}
-
 	if hasWaiting {
 		return StatusWaiting
 	}
@@ -210,9 +208,12 @@ type Runner struct {
 	workspaceID string
 	session     *Session
 	agent       *AgentDef
-	workDir     string // worktree path
+	workDir     string
 	send        func(interface{})
 	cmd         *exec.Cmd
+	ptmx        *os.File // PTY master fd, nil if not using PTY
+	PtyRows     uint16   // initial PTY rows (set before Start)
+	PtyCols     uint16   // initial PTY cols (set before Start)
 }
 
 // NewRunner creates a new Runner for the given session and agent.
@@ -223,19 +224,198 @@ func NewRunner(workspaceID string, session *Session, agent *AgentDef, workDir st
 		agent:       agent,
 		workDir:     workDir,
 		send:        send,
+		PtyRows:     40,
+		PtyCols:     120,
 	}
 }
 
-// Start spawns the agent process and begins streaming output. It uses
-// os/exec.CommandContext for cancellation support. Output is read using raw
-// Read() calls for smooth streaming.
-//
-// The runner writes ONLY to the session's ring buffers. It sends OutputMsg
-// to the TUI for notification only (the TUI should NOT also write to the
-// ring buffer — it should just refresh the viewport from the ring buffer).
+// Start spawns the agent process and begins streaming output.
+// Uses PTY by default for proper terminal output. Falls back to pipes
+// if PTY allocation fails or if the agent uses stream-json format.
 func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error {
 	args := r.agent.BuildArgs(prompt, isResume)
+	r.cmd = exec.CommandContext(ctx, r.agent.Command, args...)
+	r.cmd.Dir = r.workDir
+	r.cmd.Env = r.agent.BuildEnv()
 
+	// Use stream-json parsing for agents that explicitly request it.
+	if r.agent.OutputFormat == "stream-json" {
+		return r.startWithPipes(ctx)
+	}
+
+	// Try PTY first; fall back to pipes.
+	if err := r.startWithPTY(ctx); err != nil {
+		return r.startWithPipes(ctx)
+	}
+	return nil
+}
+
+// startWithPTY allocates a PTY and starts the process.
+func (r *Runner) startWithPTY(ctx context.Context) error {
+	rows := r.PtyRows
+	cols := r.PtyCols
+	if rows == 0 {
+		rows = 40
+	}
+	if cols == 0 {
+		cols = 120
+	}
+	ptmx, err := pty.StartWithSize(r.cmd, &pty.Winsize{
+		Rows: rows,
+		Cols: cols,
+	})
+	if err != nil {
+		return fmt.Errorf("allocating PTY: %w", err)
+	}
+	r.ptmx = ptmx
+
+	// Stream PTY output.
+	go r.streamPTY(ptmx)
+
+	// Wait for process exit.
+	go func() {
+		waitErr := r.cmd.Wait()
+		// Close PTY after process exits.
+		ptmx.Close()
+
+		exitCode := 0
+		if waitErr != nil {
+			if exitErr, ok := waitErr.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+		r.send(DoneMsg{
+			WorkspaceID: r.workspaceID,
+			SessionID:   r.session.ID,
+			ExitCode:    exitCode,
+			Err:         waitErr,
+		})
+	}()
+
+	return nil
+}
+
+// ResizePTY updates the PTY dimensions (called when panel resizes).
+func (r *Runner) ResizePTY(rows, cols uint16) {
+	if r.ptmx != nil {
+		_ = pty.Setsize(r.ptmx, &pty.Winsize{Rows: rows, Cols: cols})
+	}
+}
+
+// streamPTY reads from the PTY master and processes output.
+func (r *Runner) streamPTY(ptmx *os.File) {
+	buf := make([]byte, 4096)
+	ringBuffer := r.session.Output
+	var partial string
+
+	for {
+		n, err := ptmx.Read(buf)
+		if n > 0 {
+			chunk := string(buf[:n])
+
+			// Filter out cursor movement and screen clear sequences,
+			// but keep color codes.
+			chunk = filterANSI(chunk)
+
+			r.send(OutputMsg{
+				WorkspaceID: r.workspaceID,
+				SessionID:   r.session.ID,
+				Chunk:       chunk,
+				IsStderr:    false,
+			})
+
+			partial += chunk
+			for {
+				idx := strings.Index(partial, "\n")
+				if idx == -1 {
+					break
+				}
+				line := partial[:idx]
+				// Strip carriage returns from PTY output.
+				line = strings.TrimRight(line, "\r")
+				if line != "" {
+					ringBuffer.Write(line)
+				}
+				partial = partial[idx+1:]
+			}
+		}
+
+		if err != nil {
+			break
+		}
+	}
+
+	if partial != "" {
+		partial = strings.TrimRight(partial, "\r")
+		if partial != "" {
+			ringBuffer.Write(partial)
+		}
+	}
+}
+
+// filterANSI strips cursor movement, screen clear, and other non-color
+// escape sequences while keeping SGR (color) codes intact.
+func filterANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			// CSI sequence: ESC [ <params> <final>
+			j := i + 2
+			// Read parameter bytes (0x30-0x3f)
+			for j < len(s) && s[j] >= 0x30 && s[j] <= 0x3f {
+				j++
+			}
+			// Read intermediate bytes (0x20-0x2f)
+			for j < len(s) && s[j] >= 0x20 && s[j] <= 0x2f {
+				j++
+			}
+			// Final byte
+			if j < len(s) {
+				final := s[j]
+				j++
+				if final == 'm' {
+					// SGR (color) — keep it.
+					b.WriteString(s[i:j])
+				}
+				// All other CSI sequences (cursor movement, clear, etc.) — strip.
+				i = j
+			} else {
+				// Incomplete sequence — skip.
+				i = j
+			}
+		} else if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == ']' {
+			// OSC sequence: ESC ] ... BEL or ST — skip entirely.
+			j := i + 2
+			for j < len(s) && s[j] != '\x07' {
+				if s[j] == '\x1b' && j+1 < len(s) && s[j+1] == '\\' {
+					j += 2
+					break
+				}
+				j++
+			}
+			if j < len(s) && s[j] == '\x07' {
+				j++
+			}
+			i = j
+		} else if s[i] == '\r' {
+			// Skip bare carriage returns.
+			i++
+		} else {
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+// startWithPipes uses traditional stdout/stderr pipes (for stream-json or fallback).
+func (r *Runner) startWithPipes(ctx context.Context) error {
+	// Re-create the command since the previous one may have been consumed by PTY attempt.
+	args := r.agent.BuildArgs(r.session.Task, false)
 	r.cmd = exec.CommandContext(ctx, r.agent.Command, args...)
 	r.cmd.Dir = r.workDir
 	r.cmd.Env = r.agent.BuildEnv()
@@ -254,17 +434,14 @@ func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error 
 		return fmt.Errorf("starting agent process: %w", err)
 	}
 
-	// Stream stdout — use JSON parser for stream-json agents.
 	if r.agent.OutputFormat == "stream-json" {
 		go r.streamOutputJSON(stdout)
 	} else {
 		go r.streamOutput(stdout, false)
 	}
 
-	// Stderr is always raw text.
 	go r.streamOutput(stderr, true)
 
-	// Wait for process exit.
 	go func() {
 		waitErr := r.cmd.Wait()
 		exitCode := 0
@@ -286,10 +463,7 @@ func (r *Runner) Start(ctx context.Context, prompt string, isResume bool) error 
 	return nil
 }
 
-// streamOutput reads from the given reader using raw Read() calls and sends
-// OutputMsg chunks to the TUI for notification. It writes complete lines to
-// the session's ring buffer. The TUI should NOT also write to the ring buffer;
-// it should refresh its viewport from the ring buffer contents.
+// streamOutput reads from the given reader and sends chunks to the TUI.
 func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 	buf := make([]byte, 4096)
 	var partial string
@@ -304,7 +478,6 @@ func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 		if n > 0 {
 			chunk := string(buf[:n])
 
-			// Send raw chunk to TUI for notification that new output arrived.
 			r.send(OutputMsg{
 				WorkspaceID: r.workspaceID,
 				SessionID:   r.session.ID,
@@ -312,7 +485,6 @@ func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 				IsStderr:    isStderr,
 			})
 
-			// Split on newlines for ring buffer storage.
 			partial += chunk
 			for {
 				idx := strings.Index(partial, "\n")
@@ -333,19 +505,14 @@ func (r *Runner) streamOutput(reader io.Reader, isStderr bool) {
 		}
 	}
 
-	// Flush any remaining partial line.
 	if partial != "" {
 		ringBuffer.Write(partial)
 	}
 }
 
-// streamOutputJSON reads newline-delimited JSON from stdout (stream-json format),
-// parses each event, and writes formatted display lines to the ring buffer.
-// This gives users visibility into tool calls, text output, and results — similar
-// to the interactive Claude Code CLI experience.
+// streamOutputJSON reads newline-delimited JSON (stream-json format).
 func (r *Runner) streamOutputJSON(reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
-	// Large buffer for JSON lines that may contain file contents in tool results.
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	parser := NewStreamParser()

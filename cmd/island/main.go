@@ -124,7 +124,7 @@ func newRootCmd() *cobra.Command {
 			app := tui.NewApp(cfg, repoRoot)
 
 			// 9. Create tea.Program with alt screen.
-			p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
+			p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 			// 10. Set program on app.
 			app.SetProgram(p)
@@ -350,8 +350,7 @@ const starterConfig = `# Island configuration
 # command = "claude"
 # first_run_args = ["-p", "{{prompt}}"]
 # resume_args = ["--continue", "-p", "{{prompt}}"]
-# extra_args = []
-# model = ""
+# extra_args = ["--verbose"]
 # permissions = "--dangerously-skip-permissions"
 # output_format = "stream-json"
 

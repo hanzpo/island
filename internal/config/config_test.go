@@ -84,16 +84,6 @@ func TestDefault(t *testing.T) {
 			},
 		},
 		{
-			name: "templates contain test refactor fix review",
-			check: func(t *testing.T, cfg *Config) {
-				for _, name := range []string{"test", "refactor", "fix", "review"} {
-					if _, ok := cfg.Templates[name]; !ok {
-						t.Errorf("expected template %q to exist", name)
-					}
-				}
-			},
-		},
-		{
 			name: "default config passes validation",
 			check: func(t *testing.T, cfg *Config) {
 				if err := Validate(cfg); err != nil {
@@ -188,66 +178,3 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestApplyTemplate(t *testing.T) {
-	tests := []struct {
-		name        string
-		tmpl        TemplateConfig
-		description string
-		want        string
-	}{
-		{
-			name: "simple replacement",
-			tmpl: TemplateConfig{
-				Name:   "test",
-				Prompt: "Write tests for: {{description}}",
-			},
-			description: "the user login flow",
-			want:        "Write tests for: the user login flow",
-		},
-		{
-			name: "multiple placeholders",
-			tmpl: TemplateConfig{
-				Name:   "custom",
-				Prompt: "{{description}} needs {{description}}",
-			},
-			description: "attention",
-			want:        "attention needs attention",
-		},
-		{
-			name: "no placeholder",
-			tmpl: TemplateConfig{
-				Name:   "static",
-				Prompt: "Run all tests",
-			},
-			description: "something",
-			want:        "Run all tests",
-		},
-		{
-			name: "empty description",
-			tmpl: TemplateConfig{
-				Name:   "test",
-				Prompt: "Fix: {{description}}",
-			},
-			description: "",
-			want:        "Fix: ",
-		},
-		{
-			name: "default test template",
-			tmpl: TemplateConfig{
-				Name:   "test",
-				Prompt: "Write comprehensive tests for: {{description}}",
-			},
-			description: "the HTTP handler package",
-			want:        "Write comprehensive tests for: the HTTP handler package",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ApplyTemplate(tt.tmpl, tt.description)
-			if got != tt.want {
-				t.Errorf("ApplyTemplate() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

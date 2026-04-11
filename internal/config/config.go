@@ -4,20 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config is the top-level configuration structure for island.
 type Config struct {
-	General   GeneralConfig             `toml:"general"`
-	Agents    map[string]AgentConfig    `toml:"agents"`
-	MCP       map[string]MCPServer      `toml:"mcp"`
-	Hooks     HooksConfig               `toml:"hooks"`
-	Init      InitConfig                `toml:"init"`
-	Templates map[string]TemplateConfig `toml:"templates"`
-	UI        UIConfig                  `toml:"ui"`
+	General GeneralConfig          `toml:"general"`
+	Agents  map[string]AgentConfig `toml:"agents"`
+	MCP     map[string]MCPServer   `toml:"mcp"`
+	Hooks   HooksConfig            `toml:"hooks"`
+	Init    InitConfig             `toml:"init"`
+	UI      UIConfig               `toml:"ui"`
 }
 
 // GeneralConfig holds general island settings.
@@ -66,12 +64,6 @@ type InitConfig struct {
 	Script string `toml:"script"`
 }
 
-// TemplateConfig defines a prompt template.
-type TemplateConfig struct {
-	Name   string `toml:"name"`
-	Prompt string `toml:"prompt"`
-}
-
 // UIConfig holds TUI display settings.
 type UIConfig struct {
 	Theme           string `toml:"theme"`
@@ -100,7 +92,6 @@ func Default() *Config {
 				ExtraArgs:    []string{"--verbose"},
 				Env:          map[string]string{},
 				Permissions:  "--dangerously-skip-permissions",
-				OutputFormat: "stream-json",
 			},
 			"codex": {
 				Command:      "codex",
@@ -120,24 +111,6 @@ func Default() *Config {
 		MCP:   map[string]MCPServer{},
 		Hooks: HooksConfig{},
 		Init:  InitConfig{},
-		Templates: map[string]TemplateConfig{
-			"test": {
-				Name:   "test",
-				Prompt: "Write comprehensive tests for: {{description}}",
-			},
-			"refactor": {
-				Name:   "refactor",
-				Prompt: "Refactor the following code: {{description}}",
-			},
-			"fix": {
-				Name:   "fix",
-				Prompt: "Fix the following issue: {{description}}",
-			},
-			"review": {
-				Name:   "review",
-				Prompt: "Review the following code and suggest improvements: {{description}}",
-			},
-		},
 		UI: UIConfig{
 			Theme:           "",
 			ShowStderr:      true,
@@ -214,8 +187,3 @@ func Validate(cfg *Config) error {
 	return nil
 }
 
-// ApplyTemplate replaces {{description}} in the template prompt with the
-// given description string.
-func ApplyTemplate(tmpl TemplateConfig, description string) string {
-	return strings.ReplaceAll(tmpl.Prompt, "{{description}}", description)
-}
